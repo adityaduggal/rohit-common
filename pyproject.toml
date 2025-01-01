@@ -8,6 +8,6 @@ readme = "README.md"
 dynamic = ["version"]
 dependencies = [
     # Core dependencies
-    "phonenumbers==8.12.40",
-    "india-compliance @ git+https://github.com/resilient-tech/india-compliance.git#version-14",
+    "phonenumbers==8.13.13",
+    "india-compliance @ git+https://github.com/resilient-tech/india-compliance.git#version-15",
 ]
