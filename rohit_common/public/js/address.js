@@ -17,7 +17,9 @@ frappe.ui.form.on("Address", {
 			frm.doc.latitude = frm.fields_dict.location.map.getCenter()['lat'];
 			frm.doc.longitude = frm.fields_dict.location.map.getCenter()['lng'];
 		}
-	},
+    },
+    // Changes on changing country field would the reset_flds to no valuue so that you need to enter them again
+    // tin_no, excide_no are legacy fields neeeded for old excise invoices prior to GST invoices 01-Jul-2017
     country: function(frm) {
         var reset_flds = ["state", "state_rigpl", "gstin", "gst_state", "gst_state_number", "tin_no", 
         "excise_no", "latitude", "longitude", "global_google_code", "known_states"];
