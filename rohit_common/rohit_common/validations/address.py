@@ -76,7 +76,7 @@ def gstin_validation(doc):
                     else:
                         frappe.throw("State Selected {0} for Address {1}, GSTIN number should begin with {2}".
                                      format(doc.state_rigpl, doc.name, state.state_code_numeric))
-                validate_gstin_from_portal(doc)
+                # validate_gstin_from_portal(doc)
             doc.pan = doc.gstin[2:12]
         else:
             doc.pan = ""
