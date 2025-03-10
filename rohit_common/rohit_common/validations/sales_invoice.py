@@ -30,7 +30,8 @@ def validate(doc, method):
     check_sales_taxes_integrity(doc)
     add_list = [doc.customer_address, doc.shipping_address_name]
     for add in add_list:
-        check_validated_gstin(add, doc)
+        pass
+        # check_validated_gstin(add, doc)
 
 
 def check_govt_related_rules(doc):
