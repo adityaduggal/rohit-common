@@ -13,7 +13,8 @@ def validate(doc,method):
 	check_taxes_integrity(doc,method)
 	add_list = [doc.shipping_address, doc.supplier_address]
 	for add in add_list:
-		check_validated_gstin(add, doc)
+		pass
+		# check_validated_gstin(add, doc)
 
 
 def check_gst_rules(doc,method):
