@@ -1,0 +1,13 @@
+[
+ {
+  "docstatus": 0,
+  "doctype": "Client Script",
+  "dt": "Sales Invoice",
+  "enabled": 1,
+  "modified": "2025-03-24 02:47:48.894025",
+  "module": "rohit_common",
+  "name": "Sales Invoice GSTIN Taxes",
+  "script": "frappe.ui.form.on('Sales Invoice', {\n\trefresh(frm) {\n\t\t// your code here\n\t},\n\tcustomer(frm){\n\t    frm.trigger('set_gstin_taxes');\n\t},\n\tdispatch_address_name(frm){\n\t    frm.trigger('set_gstin_taxes');\n\t},\n\tshipping_address_name(frm){\n\t    frm.trigger('set_gstin_taxes');\n\t},\n\tvalidate(frm){\n\t    frm.trigger('set_gstin_taxes');  \n\t},\n\tset_gstin_taxes(frm){\n\t    if (!frm.doc.customer && !frm.doc.dispatch_address_name && !frm.doc.shipping_address_name){\n\t        return;\n\t    }\n\t    \n\t    frappe.call({\n\t        'method': 'frappe.client.get_list',\n\t        'args': {\n\t            'doctype': 'Address',\n\t            'fields': ['name', 'state_rigpl', 'country'],\n\t            'filters': {\n\t                'name': ['in', [frm.doc.dispatch_address_name, frm.doc.shipping_address_name]]\n\t            }\n\t        },\n\t        callback(res){\n\t            let by_id = {}, \n\t                shipping = frm.doc.shipping_address_name,\n\t                dispatch = frm.doc.dispatch_address_name;\n\t                \n\t            res.message.forEach(address => by_id[address.name] = address);\n\t            \n\t            if (by_id[shipping].country == by_id[dispatch].country) {\n\t                if (by_id[shipping].state_rigpl == by_id[dispatch].state_rigpl){\n\t                    frm.set_value('taxes_and_charges', 'RIGB GST Local Sales');\n\t                } else {\n\t                    frm.set_value('taxes_and_charges', 'RIGB GST Central Sales');\n\t                }\n\t            } else {\n\t                frm.set_value('taxes_and_charges', 'RIGB Export Under Bond');\n\t            }\n\t            \n\t        }\n\t    });\n\t    \n\t    \n\t}\n});",
+  "view": "Form"
+ }
+]

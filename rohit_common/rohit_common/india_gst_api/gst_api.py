@@ -14,6 +14,7 @@ def get_gstr1(gstin, ret_period, action):
     Returns JSON for GSTR1 for a given GSTIN, Return Period and action is Required
     Action is basically Sub-type like B2B etc for Returns
     """
+    import pdb; pdb.set_trace()
     api = "gstr1"
     auth_token = get_auth_token(gstin)
     url = get_gst_url(api, action, gstin) + "&authtoken=" + auth_token + "&ret_period=" + ret_period

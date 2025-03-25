@@ -5,6 +5,7 @@
 from __future__ import unicode_literals
 import frappe
 import time
+from sys import exit
 from datetime import date
 from frappe.utils import flt, getdate
 from frappe.utils.background_jobs import enqueue

@@ -13,11 +13,16 @@ app_version = "0.0.1"
 hide_in_installer = True
 
 # Fixtures help https://frappeframework.com/docs/v13/user/en/python-api/hooks#fixtures
-fixtures = []
+fixtures = [
+    {'dt': 'Client Script', 'filters': {
+        'module': 'rohit_common'
+    }}
+]
 
 override_whitelisted_methods = {  # Below mentod would also take into account the search fields
     # mentioned in the Customize form view
-    "frappe.core.doctype.file.file.get_files_by_search_text": "rohit_common.core.file.get_files_by_search_text"
+    "frappe.core.doctype.file.file.get_files_by_search_text": "rohit_common.core.file.get_files_by_search_text",
+    "frappe.core.api.file.get_files_by_search_text": "rohit_common.core.file.get_files_by_search_text"
 }
 
 # Includes in <head>

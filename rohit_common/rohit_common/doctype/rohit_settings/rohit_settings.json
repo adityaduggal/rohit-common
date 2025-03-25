@@ -1,4 +1,5 @@
 {
+ "actions": [],
  "creation": "2020-09-23 15:55:42.979487",
  "doctype": "DocType",
  "editable_grid": 1,
@@ -23,6 +24,18 @@
   "sandbox_api_link",
   "access_token",
   "access_token_time",
+  "pfx_certificate_section",
+  "pfx_country",
+  "pfx_state",
+  "pfx_locality",
+  "pfx_organization",
+  "pfx_common_name",
+  "pfx_email",
+  "column_break_xvtb",
+  "cert_priv_key",
+  "cert_file",
+  "cert_pfx",
+  "update_cert",
   "sb1",
   "roles_allow_pub_att",
   "docs_with_pub_att",
@@ -266,10 +279,80 @@
    "fieldname": "email_stale_days",
    "fieldtype": "Int",
    "label": "Email Stale Days"
+  },
+  {
+   "description": "File: .key",
+   "fieldname": "cert_priv_key",
+   "fieldtype": "Attach",
+   "label": "Certificate Private Key",
+   "read_only": 1
+  },
+  {
+   "description": "File: .cer",
+   "fieldname": "cert_file",
+   "fieldtype": "Attach",
+   "label": "Certificate File",
+   "read_only": 1
+  },
+  {
+   "description": "File: .pfx",
+   "fieldname": "cert_pfx",
+   "fieldtype": "Attach",
+   "label": "Certificate PFX",
+   "read_only": 1
+  },
+  {
+   "fieldname": "update_cert",
+   "fieldtype": "Button",
+   "label": "Update/Generate Certificate"
+  },
+  {
+   "fieldname": "pfx_certificate_section",
+   "fieldtype": "Section Break",
+   "label": "PFX Certificate"
+  },
+  {
+   "default": "India",
+   "fieldname": "pfx_country",
+   "fieldtype": "Link",
+   "label": "Country",
+   "options": "Country",
+   "reqd": 1
+  },
+  {
+   "fieldname": "pfx_state",
+   "fieldtype": "Data",
+   "label": "State"
+  },
+  {
+   "fieldname": "pfx_locality",
+   "fieldtype": "Data",
+   "label": "City"
+  },
+  {
+   "fieldname": "pfx_organization",
+   "fieldtype": "Data",
+   "label": "Business Registry Name"
+  },
+  {
+   "fieldname": "pfx_common_name",
+   "fieldtype": "Data",
+   "label": "Business Common Name"
+  },
+  {
+   "fieldname": "pfx_email",
+   "fieldtype": "Data",
+   "label": "Email"
+  },
+  {
+   "fieldname": "column_break_xvtb",
+   "fieldtype": "Column Break",
+   "options": "update_cert"
   }
  ],
  "issingle": 1,
- "modified": "2022-08-08 09:37:52.222305",
+ "links": [],
+ "modified": "2025-03-24 02:08:51.018357",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "Rohit Settings",
@@ -287,7 +370,9 @@
   }
  ],
  "quick_entry": 1,
+ "row_format": "Dynamic",
  "sort_field": "modified",
  "sort_order": "DESC",
+ "states": [],
  "track_changes": 1
 }

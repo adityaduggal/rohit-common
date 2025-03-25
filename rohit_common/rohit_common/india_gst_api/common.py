@@ -163,7 +163,7 @@ def get_gsp_details(api, action, gstin=None, api_type=None):
 
 
     if not gstin:
-        if api_type == 'common':
+        if api_type == 'common' and not sandbox:
             gstin = rset.gstin
         else:
             if sandbox == 1:
@@ -175,9 +175,10 @@ def get_gsp_details(api, action, gstin=None, api_type=None):
     api_url = '/' + api
     if api_type == "common":
         api_url = get_api_url(api=api, api_type=api_type)
-    else:
-        if rset.sandbox_mode == 1:
-            gsp_link = gsp_sandbox_link
+    
+    if rset.sandbox_mode == 1:
+        gsp_link = gsp_sandbox_link
+    
     if api_type == 'common':
         gsp_link = gsp_link + api_url + 'aspid=' + asp_id + '&password=' + asp_pass + '&Action=' + action
 
