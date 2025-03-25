@@ -131,13 +131,13 @@ def get_headers():
 
 
 def search_gstin(gstin=None):
-    import pdb; pdb.set_trace()
+    #import pdb; pdb.set_trace()
     gsp_link, asp_id, asp_pass, caller_gstin, sandbox = get_gsp_details(api_type="common", action='TP', api='search')
     if not gstin:
         gstin = caller_gstin
     full_url = gsp_link + '&Gstin=' + caller_gstin + '&SearchGstin=' + gstin
     try:
-        response = requests.get(url=full_url, timeout=timeout)
+        response = requests.get(url=full_url, timeout=timeout, header=get_headers())
     except Exception as e:
         frappe.throw(f"Some Error Occurred while Searching for GSTIN {gstin} and the Error is {e}")
     json_response = response.json()
