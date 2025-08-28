@@ -503,8 +503,10 @@ def change_file_path(fd):
             frappe.db.set_value("File", fd.name, "file_available_on_server", 1)
             frappe.db.set_value("File", fd.name, "is_private", 1)
     else:
-        print("File Name is Not There hence Exiting")
-        exit()
+        frappe.throw("File Name is Not There hence Exiting")
+        return
+        # print("File Name is Not There hence Exiting")
+        # exit()
 
 
 def delete_only_file_doc(fd, comment=None, ref_doc_exists=1):

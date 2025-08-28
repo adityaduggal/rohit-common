@@ -519,8 +519,10 @@ def get_auth_token_if_needed():
             frappe.db.commit()
             rset.reload()
         else:
-            print(f"Error while fetching the Auth Token {res_json}")
-            exit()
+            frappe.throw(f"Error while fetching the Auth Token {res_json}")
+            # print(f"Error while fetching the Auth Token {res_json}")
+            # exit()
+            return
     else:
         access_token = rset.access_token
     return access_token

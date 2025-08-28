@@ -339,8 +339,10 @@ def validate_gstin_from_portal(doc):
             doc.gst_status = gstin_json.get("sts")
             doc.gst_validation_date = date.today()
         else:
-            frappe.msgprint("Status Code Return is Zero Hence Exiting")
-            exit()
+            frappe.throw("Status Code Return is Zero Hence Exiting")
+            # frappe.msgprint("Status Code Return is Zero Hence Exiting")
+            # exit()
+            return
     if doc.gst_status in ('Inactive', 'Cancelled'):
         doc.disabled = 1
     elif doc.gst_status == 'Suspended':

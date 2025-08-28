@@ -46,8 +46,10 @@ def input_table_name():
     tb = input("Enter the Name of the Table for Dropping Fields Ex: Sales Invoice, enter the value exactly as in ERP: ")
     tbl_exists = frappe.db.sql("""SHOW TABLES LIKE 'tab%s'""" % tb)
     if not tbl_exists:
-        print(f"There is No Table Named tab{tb}. Hence Exiting")
-        exit()
+        frappe.throw(f"There is No Table Named tab{tb}. Hence Exiting")
+        # print(f"There is No Table Named tab{tb}. Hence Exiting")
+        # exit()
+        return
     else:
         return tb
 
@@ -202,8 +204,10 @@ def change_varchar_len_as_per_input(tbl_name, col_name, exist_len, max_len, sug_
               f"Time Taken for Field Conversion = {int(time.time() - fd_time)} secs and Total Elapsed "
               f"Time = {int(time.time() - st_time)} secs\n")
     else:
-        print(f"{usr_inp} is an Illegal Value please Restart again")
-        exit()
+        frappe.throw(f"{usr_inp} is an Illegal Value please Restart again")
+        return
+        # print(f"{usr_inp} is an Illegal Value please Restart again")
+        # exit()
 
 
 def alter_varchar_table(tb_name, col_name, var_len):

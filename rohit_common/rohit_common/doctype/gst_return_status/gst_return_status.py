@@ -13,6 +13,7 @@ from erpnext.accounts.utils import get_fiscal_year
 
 
 class GSTReturnStatus(Document):
+	@frappe.whitelist()
 	def get_return_status(self):
 		today = datetime.today()
 		self.returns = []
