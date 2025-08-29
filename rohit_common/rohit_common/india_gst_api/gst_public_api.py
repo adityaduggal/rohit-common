@@ -54,5 +54,5 @@ def get_arn_status(ret_status_json, type_of_return, ret_period):
         if found != 1:
             frappe.msgprint(f"No Filing Data found for {type_of_return} for Period: {ret_period}")
     else:
-        fraeppe.msgprint("No eFiling Data Received")
+        frappe.msgprint("No eFiling Data Received")
     return arn, status, dof, mof
