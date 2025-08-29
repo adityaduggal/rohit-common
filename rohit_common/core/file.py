@@ -22,27 +22,33 @@ def custom_file_permissions(doc, ptype=None, user=None):
     has_access = False
     user = user or frappe.session.user
     is_sys = check_system_manager(user)
+
+    # System Manager & Administrator always get full access
+    if user == "Administrator" or is_sys:
+        return True
+
+    # Check if shared
     shd_name = get_share_name(doctype=doc.doctype, name=doc.name, user=user, everyone=0)
     if shd_name:
         shd = frappe.get_doc("DocShare", shd_name)
         if shd.write or shd.share or shd.submit:
-            has_access = "write"
-        else:
-            has_access = "read"
-    elif ptype == "create":
-        has_access = frappe.has_permission("File", "create", user=user)
-    elif not doc.is_private or doc.owner in [user, "Guest"] \
-        or user == "Administrator" or is_sys == 1:
-        has_access = True
-    elif doc.attached_to_doctype and doc.attached_to_name:
-        attached_to_doctype = doc.attached_to_doctype
-        attached_to_name = doc.attached_to_name
-        try:
-            ref_doc = frappe.get_doc(attached_to_doctype, attached_to_name)
+            return "write"
+        return "read"
 
+    # Creating a new file
+    if ptype == "create":
+        return frappe.has_permission("File", "create", user=user)
+
+    # Public file or owner
+    if not doc.is_private or doc.owner in [user, "Guest"]:
+        return True
+
+    # If attached → check permission on parent doc
+    if doc.attached_to_doctype and doc.attached_to_name:
+        try:
+            ref_doc = frappe.get_doc(doc.attached_to_doctype, doc.attached_to_name)
             if ptype in ["write", "create", "delete"]:
                 has_access = ref_doc.has_permission("write")
-
                 if ptype == "delete" and not has_access:
                     frappe.throw(
                         _(
