@@ -140,7 +140,7 @@ def check_local_natl_tax_rules(doc, template_doc):
                 Change the Selected Tax")
     elif ship_country == 'India' and bill_state != template_doc.state and \
             template_doc.is_sample != 1:
-        doc.place_of_supply = bill_state
+        # doc.place_of_supply = bill_state
         if template_doc.is_local_sales == 1:
             frappe.throw(f"Selected Tax {doc.taxes_and_charges} is LOCAL Tax but Billing Address \
                 is in Different State {bill_state}, hence either change Billing Address or Change \
