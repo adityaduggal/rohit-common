@@ -13,7 +13,20 @@ app_version = "0.0.1"
 hide_in_installer = True
 
 # Fixtures help https://frappeframework.com/docs/v13/user/en/python-api/hooks#fixtures
-fixtures = []
+fixtures = [
+    {
+        "doctype": "Custom DocPerm",
+        "filters": [
+            [
+                "parent",
+                "in",
+                [
+                    "File"
+                ],
+            ]
+        ],
+    },
+]
 
 override_whitelisted_methods = {  # Below mentod would also take into account the search fields
     # mentioned in the Customize form view
