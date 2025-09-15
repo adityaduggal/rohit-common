@@ -1,1 +1,8 @@
 __version__ = "15.0.0"
+
+# Monkey-patch AssetDepreciationSchedule to add set_draft_asset_depr_schedule_details
+
+from erpnext.assets.doctype.asset_depreciation_schedule.asset_depreciation_schedule import AssetDepreciationSchedule
+from rohit_common.patches.asset_depr_schedule_patch_utils import set_draft_asset_depr_schedule_details
+AssetDepreciationSchedule.set_draft_asset_depr_schedule_details = set_draft_asset_depr_schedule_details
+
