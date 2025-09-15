@@ -46,8 +46,8 @@ def validate(doc, method):
         for d in fb_list:
             doc.append("finance_books", d)
         #frappe.throw("Finance Book Entry is Mandatory")
-    base_dep_date = get_next_dep_date(doc, dep_freq, tot_no_of_deps)
-    make_dep_schedule(doc, base_dep_date, exp_val_aft_life, dep_freq, tot_no_of_deps)
+    # base_dep_date = get_next_dep_date(doc, dep_freq, tot_no_of_deps)
+    # make_dep_schedule(doc, base_dep_date, exp_val_aft_life, dep_freq, tot_no_of_deps)
 
 def autoname(doc, method):
     if doc.get_automatic_name == 1:
