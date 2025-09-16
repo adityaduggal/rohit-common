@@ -226,12 +226,13 @@ def get_gl_entries(filters, accounting_dimensions):
 
 
 def get_conditions(filters):
-    # Get the start and end dates of the fiscal year based on the 'from_date' filter
     fy = get_fiscal_year(filters.from_date, company=filters.company)
     filters.fy_start_date = fy[1]
 
     conditions = []
-    ignore_is_opening = frappe.get_single_value("Accounts Settings", "ignore_is_opening_check_for_reporting")
+
+    # Fetches transactions ONLY within the date range. Solves file size errors.
+    conditions.append("posting_date BETWEEN %(from_date)s AND %(to_date)s")
 
     if filters.get("account"):
         filters.account = get_accounts_with_children(filters.account)
@@ -281,17 +282,6 @@ def get_conditions(filters):
     if filters.get("party"):
         conditions.append("party in %(party)s")
 
-    # Always fetch data from the start of the fiscal year to correctly calculate the opening balance.
-    # The python logic will handle separating the transactions that occurred before the 'from_date'.
-    if not ignore_is_opening:
-        conditions.append("(posting_date >= %(fy_start_date)s or is_opening = 'Yes')")
-    else:
-        conditions.append("posting_date >= %(fy_start_date)s")
-
-    if not ignore_is_opening:
-        conditions.append("(posting_date <=%(to_date)s or is_opening = 'Yes')")
-    else:
-        conditions.append("posting_date <=%(to_date)s")
     if filters.get("project"):
         conditions.append("project in %(project)s")
     if filters.get("include_default_book_entries"):
@@ -329,7 +319,7 @@ def get_conditions(filters):
                         conditions.append(f"{dimension.fieldname} in %({dimension.fieldname})s")
                     else:
                         conditions.append(f"{dimension.fieldname} in %({dimension.fieldname})s")
-    return "and {}".format(" and ".join(conditions)) if conditions else ""
+    return " and {}".format(" and ".join(conditions)) if conditions else ""
 
 
 def get_party_name_map():
@@ -475,87 +465,85 @@ def initialize_gle_map(gl_entries, filters):
 
 
 def get_accountwise_gle(filters, accounting_dimensions, gl_entries, gle_map):
-    data = frappe._dict()
-    account_root_type_map = frappe._dict(
-        frappe.get_all("Account", fields=["name", "root_type"], as_list=1)
-    )
-
     totals = get_totals_dict()
 
-    def update_value_in_dict(data, key, gle):
-        if key not in data:
-            data[key] = frappe._dict(
-                debit=0.0,
-                credit=0.0,
-                debit_in_account_currency=0.0,
-                credit_in_account_currency=0.0,
-            )
+    # Create a separate set of filters for the opening balance query
+    opening_filters = filters.copy()
+    
+    # Build conditions string for the opening balance query
+    opening_conditions = []
+    for key, value in {
+        "account": "account in %(account)s",
+        "party": "party in %(party)s",
+        "party_type": "party_type=%(party_type)s",
+        "cost_center": "cost_center in %(cost_center)s",
+        "project": "project in %(project)s"
+    }.items():
+        if opening_filters.get(key):
+            opening_conditions.append(value)
+    
+    for dim in get_accounting_dimensions(as_list=False):
+        if not dim.disabled and opening_filters.get(dim.fieldname):
+            opening_conditions.append(f"{dim.fieldname} in %({dim.fieldname})s")
 
-        data[key].debit += gle.debit
-        data[key].credit += gle.credit
-        data[key].debit_in_account_currency += gle.debit_in_account_currency
-        data[key].credit_in_account_currency += gle.credit_in_account_currency
+    opening_conditions_str = " and " + " and ".join(opening_conditions) if opening_conditions else ""
 
-        if filters.get("show_net_values_in_party_account"):
-            root_type_for_entry = account_root_type_map.get(gle.account)
-            if root_type_for_entry in ("Receivable", "Payable"):
-                net_value = data[key].debit - data[key].credit
-                net_value_in_account_currency = (
-                    data[key].debit_in_account_currency
-                    - data[key].credit_in_account_currency
-                )
-                if net_value < 0:
-                    dr_or_cr, rev_dr_or_cr = "credit", "debit"
-                else:
-                    dr_or_cr, rev_dr_or_cr = "debit", "credit"
-                data[key][dr_or_cr] = abs(net_value)
-                data[key][dr_or_cr + "_in_account_currency"] = abs(
-                    net_value_in_account_currency
-                )
-                data[key][rev_dr_or_cr] = 0
-                data[key][rev_dr_or_cr + "_in_account_currency"] = 0
+    # Fetch the SUM of all transactions before the report's start date
+    opening_balance_data = frappe.db.sql(f"""
+        SELECT
+            SUM(debit) as debit,
+            SUM(credit) as credit,
+            SUM(debit_in_account_currency) as debit_in_account_currency,
+            SUM(credit_in_account_currency) as credit_in_account_currency
+        FROM `tabGL Entry`
+        WHERE company=%(company)s
+        AND posting_date < %(from_date)s
+        AND is_cancelled = 0
+        {opening_conditions_str}
+    """, opening_filters, as_dict=1)
 
-    # Opening from PCV if closed, else from raw GL
-    is_closed = frappe.db.get_value(
-        "Company", filters.company, "enable_perpetual_inventory"
-    )
+    if opening_balance_data and opening_balance_data[0] and opening_balance_data[0].debit is not None:
+        totals.opening.update(opening_balance_data[0])
 
-    if is_closed:
-        fy = get_fiscal_year(filters.from_date, as_dict=True)
-        # Get the previous fiscal year by finding the year for the date right before the current one starts
-        prev_fy = get_fiscal_year(fy.year_start_date - 1, as_dict=True)
-
-        pcv_filters = {
-            "company": filters.company,
-            "voucher_type": "Period Closing Voucher",
-            "fiscal_year": prev_fy.name,
-            "is_cancelled": 0,
-        }
-        # If report is filtered by account, apply the same to the opening balance query
-        if filters.get("account"):
-            pcv_filters["account"] = ("in", filters.account)
-
-        pcv_entries = frappe.db.get_all(
-            "GL Entry",
-            filters=pcv_filters,
-            fields=["debit", "credit", "account", "debit_in_account_currency", "credit_in_account_currency"],
-        )
-        for e in pcv_entries:
-            update_value_in_dict(totals, "opening", _dict(e))
-            update_value_in_dict(totals, "closing", _dict(e))
-    else:
-        for g in gl_entries:
-            if getdate(g.posting_date) < filters.from_date:
-                update_value_in_dict(totals, "opening", g)
-                update_value_in_dict(totals, "closing", g)
-
-    # Transactions within date range
+    # Calculate the sum of transactions within the report's date range for the "Total" row
     for g in gl_entries:
-        if filters.from_date <= getdate(g.posting_date) <= filters.to_date:
-            update_value_in_dict(totals, "total", g)
-            update_value_in_dict(totals, "closing", g)
+        totals.total.debit += g.debit
+        totals.total.credit += g.credit
+        totals.total.debit_in_account_currency += g.debit_in_account_currency
+        totals.total.credit_in_account_currency += g.credit_in_account_currency
+
+    # --- FINAL CORRECTED LOGIC ---
+
+    # 1. Net the opening balance first for display purposes. This modifies `totals.opening`.
+    # For company currency
+    opening_balance = totals.opening.debit - totals.opening.credit
+    if opening_balance > 0:
+        totals.opening.debit = opening_balance
+        totals.opening.credit = 0
+    else:
+        totals.opening.credit = abs(opening_balance)
+        totals.opening.debit = 0
+
+    # For account currency
+    opening_balance_ac = totals.opening.debit_in_account_currency - totals.opening.credit_in_account_currency
+    if opening_balance_ac > 0:
+        totals.opening.debit_in_account_currency = opening_balance_ac
+        totals.opening.credit_in_account_currency = 0
+    else:
+        totals.opening.credit_in_account_currency = abs(opening_balance_ac)
+        totals.opening.debit_in_account_currency = 0
+
+    # 2. Now, calculate the closing balance using the (now netted) opening values and the period totals.
+    # For company currency
+    totals.closing.debit = totals.opening.debit + totals.total.debit
+    totals.closing.credit = totals.opening.credit + totals.total.credit
+
+    # For account currency
+    totals.closing.debit_in_account_currency = totals.opening.debit_in_account_currency + totals.total.debit_in_account_currency
+    totals.closing.credit_in_account_currency = totals.opening.credit_in_account_currency + totals.total.credit_in_account_currency
 
     return totals, gl_entries
+
 
 
 def get_account_type_map(company):
@@ -598,7 +586,14 @@ def get_result_as_list(data, filters):
             continue
 
         if contains_label(acct_text_l, "closing"):
-            d["balance"] = opening_balance + (total_debit - total_credit)
+            # The closing balance must be the sum of the opening balance and the net of period transactions.
+            if opening_balance is not None:
+                d["balance"] = opening_balance + (total_debit - total_credit)
+            else:
+                # Fallback for cases where there's no opening balance
+                d["balance"] = total_debit - total_credit
+            
+            # Reset for next group if any
             balance = 0.0
             opening_balance = None
             total_debit = 0.0
