@@ -23,17 +23,16 @@ class GSTReturnStatus(Document):
 				frappe.throw('Selected FY {} is before the GST Era'.format(tup[0]))
 			elif tup[1] > today.date():
 				frappe.throw('Selected FY {} has not Even Started'.format(tup[0]))
+		# try:
 		response = track_return(self.gstin, self.fiscal_year)
+		# except Exception as e:
+		frappe.throw(f"Error in GST API session or DSC: {str(response)}")
 		efiled_list = response.get('EFiledlist')
-		# frappe.throw(str(efiled_list))
 		if efiled_list:
 			self.json_reply = str(efiled_list)
 			for d in efiled_list:
 				temp_dict = frappe._dict({})
-				if d.get('valid') == 'Y':
-					temp_dict['valid_gst_return'] = 'Yes'
-				else:
-					temp_dict['valid_gst_return'] = 'No'
+				temp_dict['valid_gst_return'] = 'Yes' if d.get('valid') == 'Y' else 'No'
 				temp_dict['mode_of_filing'] = d.get('mof')
 				temp_dict['date_of_filing'] = (datetime.strptime(d.get('dof'), '%d-%m-%Y')).date()
 				temp_dict['return_period'] = d.get('ret_prd')
