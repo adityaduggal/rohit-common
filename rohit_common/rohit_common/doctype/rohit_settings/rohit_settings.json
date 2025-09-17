@@ -1,10 +1,13 @@
 {
+ "actions": [],
  "creation": "2020-09-23 15:55:42.979487",
  "doctype": "DocType",
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
   "sb0",
+  "dsc_pfx_path",
+  "dsc_password",
   "tax_pro_asp_id",
   "tax_pro_password",
   "gstin",
@@ -50,6 +53,16 @@
    "fieldname": "sb0",
    "fieldtype": "Section Break",
    "label": "Tax Pro GSP"
+  },
+  {
+   "fieldname": "dsc_pfx_path",
+   "fieldtype": "Attach",
+   "label": "DSC PFX File Path"
+  },
+  {
+   "fieldname": "dsc_password",
+   "fieldtype": "Data",
+   "label": "DSC Password"
   },
   {
    "fieldname": "tax_pro_asp_id",
@@ -269,7 +282,8 @@
   }
  ],
  "issingle": 1,
- "modified": "2022-08-08 09:37:52.222305",
+ "links": [],
+ "modified": "2025-09-16 12:33:40.529343",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "Rohit Settings",
@@ -287,7 +301,9 @@
   }
  ],
  "quick_entry": 1,
+ "row_format": "Dynamic",
  "sort_field": "modified",
  "sort_order": "DESC",
+ "states": [],
  "track_changes": 1
 }

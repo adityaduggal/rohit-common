@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 
+from rohit_common.patches.run_unwanted_patches import run_unwanted_patches
 
 import frappe
 import erpnext
 def execute ():
+    run_unwanted_patches()
     add_default_company_fy()
 
 def add_default_company_fy():
