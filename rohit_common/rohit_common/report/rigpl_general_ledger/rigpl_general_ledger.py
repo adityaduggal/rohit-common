@@ -512,8 +512,6 @@ def get_accountwise_gle(filters, accounting_dimensions, gl_entries, gle_map):
         totals.total.debit_in_account_currency += g.debit_in_account_currency
         totals.total.credit_in_account_currency += g.credit_in_account_currency
 
-    # --- FINAL CORRECTED LOGIC ---
-
     # 1. Net the opening balance first for display purposes. This modifies `totals.opening`.
     # For company currency
     opening_balance = totals.opening.debit - totals.opening.credit
