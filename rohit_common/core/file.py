@@ -69,7 +69,7 @@ def custom_file_permissions(doc, ptype=None, user=None):
 def custom_get_permission_query_conditions(user: str | None = None) -> str:
 	user = user or frappe.session.user
 
-	if user == "Administrator":
+	if user == "Administrator" or check_system_manager(user):
 		return ""
 
 	if SYSTEM_USER_ROLE not in frappe.get_roles(user):
