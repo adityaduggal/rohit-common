@@ -6,6 +6,7 @@ from __future__ import unicode_literals
 import os
 import frappe
 from shutil import copyfile, move
+from frappe.permissions import SYSTEM_USER_ROLE, get_doctypes_with_read
 from frappe.share import get_share_name
 from frappe.utils import get_site_base_path, cstr
 from frappe.core.doctype.file.file import File, get_content_hash
@@ -32,8 +33,8 @@ def custom_file_permissions(doc, ptype=None, user=None):
     if shd_name:
         shd = frappe.get_doc("DocShare", shd_name)
         if shd.write or shd.share or shd.submit:
-            return "write"
-        return "read"
+            return True
+        return True
 
     # Creating a new file
     if ptype == "create":
@@ -51,7 +52,7 @@ def custom_file_permissions(doc, ptype=None, user=None):
                 has_access = ref_doc.has_permission("write")
                 if ptype == "delete" and not has_access:
                     frappe.throw(
-                        _(
+                        (
                             f"Cannot delete file as it belongs to {frappe.get_desk_link(doc.attached_to_doctype, doc.attached_to_name)} for which you do not have permissions"
                         ),
                         frappe.PermissionError,
@@ -65,6 +66,41 @@ def custom_file_permissions(doc, ptype=None, user=None):
 
     return has_access
 
+def custom_get_permission_query_conditions(user: str | None = None) -> str:
+	user = user or frappe.session.user
+
+	if user == "Administrator":
+		return ""
+
+	if SYSTEM_USER_ROLE not in frappe.get_roles(user):
+		# Basic user: return only own files or shared
+		return f"""
+			`tabFile`.`owner` = {frappe.db.escape(user)}
+			OR EXISTS (
+				SELECT 1 FROM `tabDocShare`
+				WHERE
+					`tabDocShare`.share_doctype = 'File'
+					AND `tabDocShare`.share_name = `tabFile`.name
+					AND `tabDocShare`.user = {frappe.db.escape(user)}
+					AND `tabDocShare`.read = 1
+			)
+		"""
+
+	# For system users, include additional readable doctypes and shares
+	readable_doctypes = ", ".join(repr(dt) for dt in get_doctypes_with_read())
+	return f"""
+		(`tabFile`.`is_private` = 0)
+		OR (`tabFile`.`attached_to_doctype` IS NULL AND `tabFile`.`owner` = {frappe.db.escape(user)})
+		OR (`tabFile`.`attached_to_doctype` IN ({readable_doctypes}))
+		OR EXISTS (
+			SELECT 1 FROM `tabDocShare`
+			WHERE
+				`tabDocShare`.share_doctype = 'File'
+				AND `tabDocShare`.share_name = `tabFile`.name
+				AND `tabDocShare`.user = {frappe.db.escape(user)}
+				AND `tabDocShare`.read = 1
+		)
+	"""
 
 @frappe.whitelist()
 def get_files_by_search_text(text):

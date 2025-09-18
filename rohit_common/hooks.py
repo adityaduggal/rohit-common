@@ -80,6 +80,10 @@ has_permission = {
      "File": "rohit_common.core.file.custom_file_permissions"
 }
 
+permission_query_conditions = {
+	"File": "rohit_common.core.file.custom_get_permission_query_conditions",
+}
+
 # Javascripts for Standard Documents to Override Forms Script
 # -----------
 doctype_js = {
