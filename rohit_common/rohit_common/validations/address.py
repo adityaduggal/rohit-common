@@ -16,7 +16,8 @@ from ...utils.address_utils import all_address_text_validations
 from ...utils.phone_utils import comma_phone_validations
 from ...utils.rohit_common_utils import get_country_code,replace_java_chars, check_system_manager,\
     check_or_rename_doc
-
+from india_compliance.gst_india.api_classes.public import PublicAPI
+from india_compliance.gst_india.utils.test_gstin_info import TestGstinInfo
 
 def autoname(doc, method):
     backend = 0
@@ -322,7 +323,7 @@ def update_fields_from_gmaps(doc, address_dict):
 
 def validate_gstin_from_portal(doc):
     """
-    Validates GSTIN from GST Portal
+    Validates GSTIN using India Compliance Public API
     """
     auto_days = flt(frappe.get_value("Rohit Settings", "Rohit Settings",
         "auto_validate_gstin_after"))
@@ -330,31 +331,49 @@ def validate_gstin_from_portal(doc):
         days_since_validation = (date.today() - getdate(doc.gst_validation_date)).days
     else:
         days_since_validation = 999
+
     if doc.validated_gstin != doc.gstin or days_since_validation >= auto_days:
-        # Validate GSTIN status after 30 days if done manually changes
-        gstin_json = search_gstin(doc.gstin)
-        if not gstin_json.get("status_cd"):
+        try:
+            if frappe.get_single("GST Settings").sandbox_mode:
+                class DummyAPI:
+                    def is_ignored_error(self, _):
+                        return False
+
+                api = DummyAPI()
+                gstin_json = TestGstinInfo.MOCK_GSTIN_INFO
+            else:
+                api = PublicAPI()
+                api.setup(doc=doc)
+                gstin_json = api.get_gstin_info(doc.gstin)
+        except Exception as e:
+            frappe.throw(f"Error validating GSTIN {doc.gstin}: {e}")
+
+        # ignored/invalid responses
+        if api.is_ignored_error(gstin_json):
+            doc.gstin_json_reply = str(gstin_json)
+            doc.validated_gstin = doc.gstin
+            doc.gst_status = gstin_json.get("sts") or "Invalid"
+            doc.gst_validation_date = date.today()
+        else:
+            # normal success response
             doc.gstin_json_reply = str(gstin_json)
             doc.validated_gstin = gstin_json.get("gstin")
             doc.gst_status = gstin_json.get("sts")
             doc.gst_validation_date = date.today()
-        else:
-            frappe.throw("Status Code Return is Zero Hence Exiting")
-            # frappe.msgprint("Status Code Return is Zero Hence Exiting")
-            # exit()
-            return
+
+    # disabling logic
     if doc.gst_status in ('Inactive', 'Cancelled'):
         doc.disabled = 1
     elif doc.gst_status == 'Suspended':
-        # Disable the address for Supplier or unlinked address
         dl_list = frappe.db.sql(f"""SELECT name, link_doctype FROM `tabDynamic Link`
-            WHERE parenttype = 'Address'  AND parent = '{doc.name}'""", as_dict=1)
+            WHERE parenttype = 'Address' AND parent = %s""", (doc.name,), as_dict=1)
         if dl_list:
             for dt in dl_list:
                 if dt.link_doctype == 'Supplier':
                     doc.disabled = 1
         else:
             doc.disabled = 1
+
     update_address_title_from_gstin_json(doc)
 
 
