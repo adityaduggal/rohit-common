@@ -21,7 +21,8 @@ fixtures = [
                 "parent",
                 "in",
                 [
-                    "File"
+                    "File",
+                    "e-Invoice Log"
                 ],
             ]
         ],

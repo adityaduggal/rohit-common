@@ -12,3 +12,8 @@ AssetDepreciationSchedule.set_draft_asset_depr_schedule_details = set_draft_asse
 from rohit_common.overrides.file import get_permission_query_conditions,has_permission
 frappe.frappe.core.doctype.file.file.has_permission=has_permission
 frappe.frappe.core.doctype.file.file.get_permission_query_conditions=get_permission_query_conditions
+
+# Override for EInvoiceData.get_data
+# from india_compliance.gst_india.utils.e_invoice import EInvoiceData
+# from rohit_common.overrides.india_compliance_einvoice import custom_get_data
+# EInvoiceData.get_data = custom_get_data
