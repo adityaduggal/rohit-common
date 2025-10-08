@@ -107,8 +107,12 @@ def country_validation(doc):
                 WHERE country = '{doc.country}'""", as_dict=1)
             if state_list:
                 if doc.state_rigpl is None or not doc.state_rigpl or doc.state_rigpl == "":
-                    frappe.throw(f"State RIGPL for Country {doc.country} is Mandatory in \
-                        Address {doc.name}")
+                    if doc.state:
+                        doc.state_rigpl = doc.state
+                    else:
+                        frappe.throw(f"State RIGPL for Country {doc.country} is Mandatory in Address {doc.name}")
+                    # frappe.throw(f"State RIGPL for Country {doc.country} is Mandatory in \
+                    #     Address {doc.name}")
                 if country_doc.pincode_length:
                     pincode_length = replace_java_chars(country_doc.pincode_length)
                     if 'or' in pincode_length:

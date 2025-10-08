@@ -22,7 +22,10 @@ fixtures = [
                 "in",
                 [
                     "File",
-                    "e-Invoice Log"
+                    "e-Invoice Log",
+                    "GSTR2A RIGPL",
+                    "GSTR-1",
+                    "Accounts Settings",
                 ],
             ]
         ],

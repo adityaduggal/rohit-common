@@ -9,5 +9,6 @@ dynamic = ["version"]
 dependencies = [
     # Core dependencies
     "phonenumbers==8.13.13",
+    "responses>=0.25.8",
     "india-compliance @ git+https://github.com/resilient-tech/india-compliance.git#version-15",
 ]
