@@ -12,6 +12,9 @@ app_url = "https://github.com/adityaduggal/rohit_common"
 app_version = "0.0.1"
 hide_in_installer = True
 
+required_apps = ["frappe/erpnext", "resilient-tech/india-compliance"]
+
+
 # Fixtures help https://frappeframework.com/docs/v13/user/en/python-api/hooks#fixtures
 fixtures = [
     {
