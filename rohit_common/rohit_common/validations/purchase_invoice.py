@@ -65,7 +65,7 @@ def update_fields(doc,method):
 		if it.gst_hsn_code != it_gst:
 			it.gst_hsn_code = it_gst
 	doc.letter_head = frappe.db.get_value("Purchase Taxes and Charges Template", doc.taxes_and_charges, "letter_head")
-	doc.place_of_supply = frappe.db.get_value("Purchase Taxes and Charges Template", doc.taxes_and_charges, "state")
+	# doc.place_of_supply = frappe.db.get_value("Purchase Taxes and Charges Template", doc.taxes_and_charges, "state")
 	doc.supplier_gstin = frappe.db.get_value("Address", doc.supplier_address, "gstin")
 	doc.company_gstin = frappe.db.get_value("Address", doc.shipping_address, "gstin")
 
