@@ -1,12 +1,14 @@
 Step 1: Fix Company GSTIN
-bench --site [your.site] execute rohit_common.migration_scripts.repopulate_company_gstin.execute
+bench --site development.localhost execute rohit_common.migration_scripts.repopulate_company_gstin.execute #1
+Step 7: Fix GL Entry Data
+bench --site development.localhost execute rohit_common.migration_scripts.gl_entry_update.execute --kwargs "{'dry_run': False, 'batch_size': 2000}" #2
 Step 2: Fix Invoice Headers
-bench --site [your.site] execute rohit_common.migration_scripts.patch_invoices.execute --kwargs "{'dry_run': False}"
+bench --site development.localhost execute rohit_common.migration_scripts.patch_invoices.execute --kwargs "{'dry_run': False}" #3
 Step 3: Fix Sales Invoice Data
-bench --site [your.site] execute rohit_common.migration_scripts.combined_gst_fix.execute --kwargs "{'dry_run': False, 'write_csv': False}"
-Step 4: Fix Sales Ledger
-bench --site [your.site] execute rohit_common.migration_scripts.create_gst_adjustment_jes.execute --kwargs "{'company': 'Rohit Industries Group Private Ltd', 'company_gstin': '06AAACR1567J1ZC', 'dry_run': False}"
+bench --site development.localhost execute rohit_common.migration_scripts.combined_gst_fix.execute --kwargs "{'dry_run': False, 'write_csv': False}" #4
+# Step 4: Fix Sales Ledger
+# bench --site development.localhost execute rohit_common.migration_scripts.create_gst_adjustment_jes.execute --kwargs "{'company': 'Rohit Industries Group Private Ltd', 'company_gstin': '06AAACR1567J1ZC', 'dry_run': False}"
 Step 5: Fix Purchase Invoice Data
-bench --site [your.site] execute rohit_common.migration_scripts.fix_purchase_invoices_gst.execute --kwargs "{'dry_run': False}"
-Step 6: Fix Purchase Ledger
-bench --site [your.site] execute rohit_common.migration_scripts.create_purchase_gst_adjustment_jes.execute --kwargs "{'company': 'Rohit Industries Group Private Ltd', 'company_gstin': '06AAACR1567J1ZC', 'dry_run': False}"
+bench --site development.localhost execute rohit_common.migration_scripts.fix_purchase_invoices_gst.execute --kwargs "{'dry_run': False}" #5
+# Step 6: Fix Purchase Ledger
+# bench --site development.localhost execute rohit_common.migration_scripts.create_purchase_gst_adjustment_jes.execute --kwargs "{'company': 'Rohit Industries Group Private Ltd', 'company_gstin': '06AAACR1567J1ZC', 'dry_run': False}"
