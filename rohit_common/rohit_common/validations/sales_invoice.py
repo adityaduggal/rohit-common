@@ -8,7 +8,7 @@ import frappe
 from datetime import date
 from frappe.utils import getdate, flt
 from frappe.utils.background_jobs import enqueue
-from ...utils.rohit_common_utils import replace_java_chars, check_dynamic_link, \
+from ...utils.rohit_common_utils import normalize_place_of_supply, replace_java_chars, check_dynamic_link, \
     check_sales_taxes_integrity, remove_html
 
 def on_submit(doc, method):
@@ -133,20 +133,20 @@ def check_local_natl_tax_rules(doc, template_doc):
 
     if bill_state == template_doc.state and template_doc.is_export == 0 and \
             template_doc.is_sample != 1:
-        # doc.place_of_supply = template_doc.state
+        doc.place_of_supply = normalize_place_of_supply(template_doc.state)
         if template_doc.is_local_sales != 1:
             frappe.throw(f"Selected Tax {doc.taxes_and_charges} is NOT LOCAL Tax but Billing \
                 Address is in Same State {bill_state}, hence either change Billing Address or \
                 Change the Selected Tax")
     elif ship_country == 'India' and bill_state != template_doc.state and \
             template_doc.is_sample != 1:
-        # doc.place_of_supply = bill_state
+        doc.place_of_supply = normalize_place_of_supply(bill_state)
         if template_doc.is_local_sales == 1:
             frappe.throw(f"Selected Tax {doc.taxes_and_charges} is LOCAL Tax but Billing Address \
                 is in Different State {bill_state}, hence either change Billing Address or Change \
                 the Selected Tax")
     elif ship_country != 'India':  # Case of EXPORTS
-        # doc.place_of_supply = "Exempted"
+        doc.place_of_supply = "Exempted"
         if template_doc.is_export != 1:
             frappe.throw(f"Selected Tax {doc.taxes_and_charges} is for Indian Sales but Billing \
                 Address is in Different Country {ship_country}, hence either change Billing \
@@ -373,9 +373,9 @@ def check_validated_gstin(add_name, doc=None):
                 days_since_validation = (date.today() - getdate(add_doc.gst_validation_date)).days
             else:
                 days_since_validation = 999
-            # if add_doc.validated_gstin != add_doc.gstin or days_since_validation > stale_days:
-            #     frappe.throw(f"GSTIN# {add_doc.gstin} for {frappe.get_desk_link(add_doc.doctype, add_doc.name)} is "
-            #                  f"NOT Validated from GST Website. Please update the Address from GST Website")
+            if add_doc.validated_gstin != add_doc.gstin or days_since_validation > stale_days:
+                frappe.throw(f"GSTIN# {add_doc.gstin} for {frappe.get_desk_link(add_doc.doctype, add_doc.name)} is "
+                             f"NOT Validated from GST Website. Please update the Address from GST Website")
             if add_doc.gst_status == "Suspended":
                 if doc:
                     if doc.doctype == "Sales Invoice":
