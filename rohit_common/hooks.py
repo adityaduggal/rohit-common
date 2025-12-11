@@ -153,6 +153,9 @@ doc_events = {
         "validate": "rohit_common.rohit_common.validations.supplier.validate",
     },
     "User": {"validate": "rohit_common.rohit_common.validations.user.validate"},
+    "e-Invoice Log": {
+        "before_save": "rohit_common.custom_method.set_einvoice_log_status_in_sales_invoice",
+    },
     #   "*": {
     #       "on_update": "method",
     #       "on_cancel": "method",

@@ -374,8 +374,9 @@ def check_validated_gstin(add_name, doc=None):
             else:
                 days_since_validation = 999
             if add_doc.validated_gstin != add_doc.gstin or days_since_validation > stale_days:
-                frappe.throw(f"GSTIN# {add_doc.gstin} for {frappe.get_desk_link(add_doc.doctype, add_doc.name)} is "
-                             f"NOT Validated from GST Website. Please update the Address from GST Website")
+                pass
+                # frappe.throw(f"GSTIN# {add_doc.gstin} for {frappe.get_desk_link(add_doc.doctype, add_doc.name)} is "
+                #              f"NOT Validated from GST Website. Please update the Address from GST Website")
             if add_doc.gst_status == "Suspended":
                 if doc:
                     if doc.doctype == "Sales Invoice":
