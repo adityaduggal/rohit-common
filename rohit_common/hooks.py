@@ -155,6 +155,7 @@ doc_events = {
     "User": {"validate": "rohit_common.rohit_common.validations.user.validate"},
     "e-Invoice Log": {
         "before_save": "rohit_common.custom_method.set_einvoice_log_status_in_sales_invoice",
+        "after_insert": "rohit_common.custom_method.sync_einvoice_log_to_reference"
     },
     #   "*": {
     #       "on_update": "method",
