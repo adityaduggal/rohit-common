@@ -1,3 +1,5 @@
+je_company_gstin.py
+migrate_gl_to_payment_ledger.py
 Step 1: Fix Company GSTIN
 bench --site development.localhost execute rohit_common.migration_scripts.repopulate_company_gstin.execute #1
 Step 7: Fix GL Entry Data

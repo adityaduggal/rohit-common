@@ -5,6 +5,7 @@ from __future__ import unicode_literals
 import frappe
 import datetime
 import urllib.parse
+from frappe.utils import getdate
 from ....utils.contact_utils import get_contact_phones, get_contact_emails
 
 
@@ -78,9 +79,14 @@ def get_columns(filters, data):
         terr_fd = {"fieldname": "territory", "label": "Territory", "fieldtype":"Link",
                     "options":"Territory"}
         col_map.append(terr_fd.copy())
+    
+    if not data:
+        return col_map, []
+
     drop_cols = []
     col_size = []
     cols = frappe._dict({})
+    
     for key in data[0].keys():
         mlen = 0
         for d in data:
@@ -229,3 +235,39 @@ def get_conditions(filters):
         else:
             cond += " AND cu.customer_group = '%s'" % filters["customer_group"]
     return cond, tbl_join, fd_add
+
+@frappe.whitelist()
+@frappe.validate_and_sanitize_search_inputs
+def get_doctypes_with_field(doctype, txt, searchfield, start, page_len, filters):
+    """
+    Finds DocTypes that contain a specific fieldname and fieldtype.
+    Searches both standard DocFields and Custom Fields.
+    """
+    fieldname = filters.get("fieldname")
+    fieldtype = filters.get("fieldtype")
+
+    standard_doctypes = frappe.get_all("DocField", 
+        filters={
+            "fieldname": fieldname, 
+            "fieldtype": fieldtype, 
+            "parent": ["like", f"%{txt}%"]
+        },
+        fields=["parent"], 
+        distinct=1, 
+        pluck="parent"
+    )
+
+    custom_doctypes = frappe.get_all("Custom Field", 
+        filters={
+            "fieldname": fieldname, 
+            "fieldtype": fieldtype, 
+            "dt": ["like", f"%{txt}%"]
+        },
+        fields=["dt"], 
+        distinct=1, 
+        pluck="dt"
+    )
+    
+    results = sorted(list(set(standard_doctypes + custom_doctypes)))
+    
+    return [[r] for r in results]

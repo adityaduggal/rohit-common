@@ -172,3 +172,7 @@ def migrate_gl_to_payment_ledger():
         print(f"{percent}% ({processed}) records processed…")
 
     print(f"✅ Migration completed. Total records migrated: {processed}")
+
+
+# from rohit_common.migration_scripts.migrate_gl_to_payment_ledger import migrate_gl_to_payment_ledger
+# migrate_gl_to_payment_ledger()

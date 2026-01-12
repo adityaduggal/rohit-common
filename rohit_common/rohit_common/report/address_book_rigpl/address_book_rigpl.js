@@ -18,32 +18,32 @@ frappe.query_reports["Address Book RIGPL"] = {
 			}
 		},
 		{
-			"fieldname":"link_type",
-			"label": "Linked to",
-			"fieldtype": "Link",
-			"options": "DocType",
-			"reqd": 0,
-			"get_query": function() {
-				let type = frappe.query_report.get_filter_value('type');
-				if (type === "Address"){
-					return {
-						"filters": {
-							"fieldtype": ["=", "HTML"],
-							"fieldname": ["=", "address_html"],
-						}
-					}
-				} else if (type === "Contact"){
-					return {
-						"filters": {
-							"fieldtype": ["=", "HTML"],
-							"fieldname": ["=", "contact_html"],
-						}
-					}
-				} else {
-					frappe.throw("Please Select Address or Contact based Report")
-				}
-			}
-		},
+            "fieldname": "link_type",
+            "label": "Linked to",
+            "fieldtype": "Link",
+            "options": "DocType",
+            "reqd": 0,
+            "get_query": function() {
+                let type = frappe.query_report.get_filter_value('type');
+                let target_field = "";
+
+                if (type === "Address") {
+                    target_field = "address_html";
+                } else if (type === "Contact") {
+                    target_field = "contact_html";
+                } else {
+                    frappe.throw("Please Select Address or Contact based Report");
+                }
+
+                return {
+                    query: "rohit_common.rohit_common.report.address_book_rigpl.address_book_rigpl.get_doctypes_with_field",
+                    filters: {
+                        "fieldtype": "HTML",
+                        "fieldname": target_field
+                    }
+                };
+            }
+        },
 		{
 			"fieldname":"linked_to",
 			"label": "Master Name",
