@@ -12,7 +12,7 @@ frappe.query_reports["Address Book RIGPL"] = {
 			"get_query": function() {
 				return {
 					"filters": {
-						"name": ["in", "Address, Contact"],
+						"name": ["in", ["Address", "Contact"]]
 					}
 				}
 			}
