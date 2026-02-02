@@ -1,5 +1,5 @@
 {
- "_last_update": "1297792942",
+ "actions": [],
  "allow_import": 1,
  "allow_rename": 1,
  "autoname": "field:shipping_co",
@@ -38,6 +38,8 @@
   "fedex_meter_number",
   "cb1",
   "fedex_password",
+  "fedex_client_id",
+  "fedex_client_secret",
   "region_code",
   "maximum_amount",
   "sb2",
@@ -176,10 +178,18 @@
    "fieldtype": "Column Break"
   },
   {
-   "fieldname": "fedex_password",
-   "fieldtype": "Data",
    "label": "Fedex Password",
    "permlevel": 1
+  },
+  {
+   "fieldname": "fedex_client_id",
+   "fieldtype": "Data",
+   "label": "FedEx Client ID"
+  },
+  {
+   "fieldname": "fedex_client_secret",
+   "fieldtype": "Data",
+   "label": "FedEx Client Secret"
   },
   {
    "default": "0",
@@ -323,13 +333,24 @@
    "fieldname": "port_code",
    "fieldtype": "Data",
    "label": "Port Code"
+  },
+  {
+   "fieldname": "fedex_client_id",
+   "fieldtype": "Data",
+   "label": "fedex client id"
+  },
+  {
+   "fieldname": "fedex_client_secret",
+   "fieldtype": "Data",
+   "label": "fedex client secret"
   }
  ],
- "modified": "2021-03-10 09:03:02.494447",
+ "links": [],
+ "modified": "2026-01-29 13:29:01.296181",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "Transporters",
- "name_case": "Title Case",
+ "naming_rule": "By fieldname",
  "owner": "aditya@rigpl.com",
  "permissions": [
   {
@@ -342,7 +363,6 @@
    "read": 1,
    "report": 1,
    "role": "System Manager",
-   "set_user_permissions": 1,
    "share": 1,
    "write": 1
   },
@@ -359,7 +379,9 @@
    "write": 1
   }
  ],
+ "row_format": "Dynamic",
  "search_fields": "shipping_co",
  "sort_field": "modified",
- "sort_order": "DESC"
+ "sort_order": "DESC",
+ "states": []
 }
