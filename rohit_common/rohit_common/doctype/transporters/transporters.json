@@ -178,7 +178,6 @@
    "fieldtype": "Column Break"
   },
   {
-
    "fieldname": "fedex_password",
    "fieldtype": "Data",
    "label": "Fedex Password",
@@ -187,12 +186,12 @@
   {
    "fieldname": "fedex_client_id",
    "fieldtype": "Data",
-   "label": "FedEx Client ID"
+   "label": "Fedex Client ID"
   },
   {
    "fieldname": "fedex_client_secret",
    "fieldtype": "Data",
-   "label": "FedEx Client Secret"
+   "label": "Fedex Client Secret"
   },
   {
    "default": "0",
@@ -336,20 +335,10 @@
    "fieldname": "port_code",
    "fieldtype": "Data",
    "label": "Port Code"
-  },
-  {
-   "fieldname": "fedex_client_id",
-   "fieldtype": "Data",
-   "label": "fedex client id"
-  },
-  {
-   "fieldname": "fedex_client_secret",
-   "fieldtype": "Data",
-   "label": "fedex client secret"
   }
  ],
  "links": [],
- "modified": "2026-01-29 13:29:01.296181",
+ "modified": "2026-02-03 22:52:18.326871",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "Transporters",
