@@ -178,6 +178,9 @@
    "fieldtype": "Column Break"
   },
   {
+
+   "fieldname": "fedex_password",
+   "fieldtype": "Data",
    "label": "Fedex Password",
    "permlevel": 1
   },
