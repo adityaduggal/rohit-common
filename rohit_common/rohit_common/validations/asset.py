@@ -23,7 +23,7 @@ def validate(doc, method):
             for d in doc.finance_books:
                 if d.depreciation_method != 'Manual':
                     d.expected_value_after_useful_life = round((ass_cat.residual_value_percent *
-                            doc.gross_purchase_amount)/100,0)
+                            doc.net_purchase_amount)/100,0)
                     exp_val_aft_life = d.expected_value_after_useful_life
                     d.frequency_of_depreciation = dep_freq
                     d.depreciation_method = dep_meth
@@ -40,7 +40,7 @@ def validate(doc, method):
         fb_dict.setdefault("depreciation_start_date", doc.purchase_date)
         fb_dict.setdefault("total_number_of_depreciations", tot_no_of_deps)
         fb_dict.setdefault("frequency_of_depreciation", dep_freq)
-        exp_val_aft_life = round((ass_cat.residual_value_percent * doc.gross_purchase_amount)/100,0)
+        exp_val_aft_life = round((ass_cat.residual_value_percent * doc.net_purchase_amount)/100,0)
         fb_dict.setdefault("expected_value_after_useful_life", exp_val_aft_life)
         fb_list.append(fb_dict)
         for d in fb_list:
@@ -109,11 +109,11 @@ def make_dep_schedule(doc, base_dep_date, exp_val_aft_life, dep_freq, tot_dep):
     middle_purchase_factor = flt(diff_days)/flt(fy_days)
 
     if tot_dep == cint(doc.number_of_depreciations_booked):
-        doc.opening_accumulated_depreciation = (doc.gross_purchase_amount - exp_val_aft_life)
+        doc.opening_accumulated_depreciation = (doc.net_purchase_amount - exp_val_aft_life)
         doc.schedules = []
         dont_make_sch = 1
     else:
-        if doc.opening_accumulated_depreciation == (doc.gross_purchase_amount - exp_val_aft_life):
+        if doc.opening_accumulated_depreciation == (doc.net_purchase_amount - exp_val_aft_life):
             doc.number_of_depreciations_booked = tot_dep
             doc.schedules = []
             dont_make_sch = 1
@@ -123,7 +123,7 @@ def make_dep_schedule(doc, base_dep_date, exp_val_aft_life, dep_freq, tot_dep):
 
     if dont_make_sch != 1:
         if not doc.get("schedules") and doc.next_depreciation_date:
-            value_after_depreciation = doc.gross_purchase_amount - doc.opening_accumulated_depreciation
+            value_after_depreciation = doc.net_purchase_amount - doc.opening_accumulated_depreciation
 
             if diff_months < dep_freq:
                 number_of_pending_depreciations = cint(tot_dep) - \
@@ -157,7 +157,7 @@ def make_dep_schedule(doc, base_dep_date, exp_val_aft_life, dep_freq, tot_dep):
             depreciation_amount = flt(d.depreciation_amount, d.precision("depreciation_amount"))
 
             if i==len(doc.get("schedules"))-1 and doc.depreciation_method == "Straight Line":
-                depreciation_amount = flt((doc.gross_purchase_amount) - flt(accumulated_depreciation) - flt(exp_val_aft_life),
+                depreciation_amount = flt((doc.net_purchase_amount) - flt(accumulated_depreciation) - flt(exp_val_aft_life),
                         d.precision("depreciation_amount"))
 
             d.depreciation_amount = depreciation_amount
@@ -170,7 +170,7 @@ def get_depreciation_amount(doc, depreciable_value, middle_purchase_factor):
     dep_freq, tot_no_of_deps, dep_meth, exp_val_aft_life = get_defaults(doc)
 
     if dep_meth in ("Straight Line", "Manual"):
-        depreciation_amount = round((flt(doc.gross_purchase_amount) -
+        depreciation_amount = round((flt(doc.net_purchase_amount) -
                 flt(exp_val_aft_life) - flt(doc.opening_accumulated_depreciation))*
                 middle_purchase_factor / (cint(tot_no_of_deps) -
                 cint(doc.number_of_depreciations_booked)),0)

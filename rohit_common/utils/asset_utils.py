@@ -44,7 +44,7 @@ def get_total_assets_for_item_code(item_code, on_date, active=1):
     else:
         disp_date_cond = ""
     query = f"""SELECT asst.name, asst.purchase_date, asst.status,
-    IFNULL(asst.disposal_date, '2099-12-31') as disposal_date, asst.gross_purchase_amount
+    IFNULL(asst.disposal_date, '2099-12-31') as disposal_date, asst.net_purchase_amount
     FROM `tabAsset` asst
     WHERE asst.docstatus = 1 AND asst.purchase_date <= '{on_date}'
     AND asst.item_code = '{item_code}' {disp_date_cond}
@@ -54,6 +54,6 @@ def get_total_assets_for_item_code(item_code, on_date, active=1):
         frappe.msgprint(f"No Assets found for {frappe.get_desk_link('Item', item_code)}")
     ast_dict["no_of_assets"] = len(assets)
     for ast in assets:
-        total_asst_value += ast.gross_purchase_amount
+        total_asst_value += ast.net_purchase_amount
     ast_dict["total_value"] = total_asst_value
     return ast_dict

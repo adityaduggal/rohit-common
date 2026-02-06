@@ -20,7 +20,7 @@ def execute(filters=None):
         data = []
         for a in assets:
             open_acc_dep = a.opening_accumulated_depreciation
-            purchase = a.gross_purchase_amount
+            purchase = a.net_purchase_amount
             row = [a.name, a.item_code, a.purchase_date, purchase, a.total_number_of_depreciations,
             open_acc_dep]
             check = 0
@@ -97,7 +97,7 @@ def get_assets(conditions, filters):
         IFNULL(ass.warehouse, "NIL") as warehouse, IFNULL(ass.model, "NIL") as model,
         IFNULL(ass.manufacturer, "NIL") as manufacturer, IFNULL(ass.status, "NO STATUS") as status,
         IFNULL(ass.description, "NIL") as description, ass.purchase_date,
-        ass.gross_purchase_amount, ass.opening_accumulated_depreciation,
+        ass.net_purchase_amount, ass.opening_accumulated_depreciation,
         IFNULL(ass_fb.expected_value_after_useful_life, 0) AS salvage,
         IFNULL(ass.disposal_date, '2199-12-31') as disposal_date,
         ass_fb.total_number_of_depreciations, as_cat_acc.fixed_asset_account, ass.purchase_receipt,

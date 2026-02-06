@@ -4,7 +4,7 @@ def set_draft_asset_depr_schedule_details(self, asset_doc, row):
     self.finance_book_id = row.idx
     self.opening_accumulated_depreciation = asset_doc.opening_accumulated_depreciation or 0
     self.opening_number_of_booked_depreciations = asset_doc.opening_number_of_booked_depreciations or 0
-    self.gross_purchase_amount = asset_doc.gross_purchase_amount
+    self.net_purchase_amount = asset_doc.net_purchase_amount
     self.depreciation_method = row.depreciation_method
     self.total_number_of_depreciations = row.total_number_of_depreciations
     self.frequency_of_depreciation = row.frequency_of_depreciation
