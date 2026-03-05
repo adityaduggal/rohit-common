@@ -14,3 +14,6 @@ Step 5: Fix Purchase Invoice Data
 bench --site development.localhost execute rohit_common.migration_scripts.fix_purchase_invoices_gst.execute --kwargs "{'dry_run': False}" #5
 # Step 6: Fix Purchase Ledger
 # bench --site development.localhost execute rohit_common.migration_scripts.create_purchase_gst_adjustment_jes.execute --kwargs "{'company': 'Rohit Industries Group Private Ltd', 'company_gstin': '06AAACR1567J1ZC', 'dry_run': False}"
+
+# Step 7: Fix Delivery Note
+# bench --site rigplerpnext.localhost execute rohit_common.migration_scripts.close_zero_amount_dns.execute --kwargs "{'dry_run': False, 'batch_size': 500}" #6
