@@ -158,18 +158,47 @@ def check_system_manager(user):
 
 
 def rebuild_tree(doctype, parent_field, group_field):
-    # call rebuild_node for all root nodes
-    # get all roots
+
     lft = 1
-    result = frappe.db.sql("SELECT name, %s, lft, rgt FROM `tab%s` WHERE `%s`='' or `%s` IS NULL "
-                           "ORDER BY name ASC" % (group_field, doctype, parent_field, parent_field), as_dict=1)
-    for r in result:
+
+    roots = frappe.db.sql(
+        f"""
+        SELECT name, `{group_field}`
+        FROM `tab{doctype}`
+        WHERE `{parent_field}` = '' OR `{parent_field}` IS NULL
+        ORDER BY name
+        """,
+        as_dict=True
+    )
+
+    frappe.db.auto_commit_on_many_writes = 1
+
+    for r in roots:
+
         if r.get(group_field) == 1:
-            rebuild_group(doctype, parent_field, r.name, group_field, lft)
+
+            lft = rebuild_group(
+                doctype,
+                parent_field,
+                r.name,
+                group_field,
+                lft
+            )
+
         else:
-            frappe.db.sql("""UPDATE `tab%s` SET lft=%s, rgt=%s WHERE name='%s'""" % (
-                doctype, lft, lft+1, r.name))
+
+            frappe.db.sql(
+                f"""
+                UPDATE `tab{doctype}`
+                SET lft=%s, rgt=%s
+                WHERE name=%s
+                """,
+                (lft, lft + 1, r.name),
+            )
+
             lft += 2
+
+    frappe.db.auto_commit_on_many_writes = 0
 
 
 def rebuild_group(doctype, parent_field, parent, group_field, left):

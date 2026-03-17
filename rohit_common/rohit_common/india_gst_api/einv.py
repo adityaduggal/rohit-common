@@ -9,7 +9,7 @@ import requests
 from datetime import datetime
 from pyqrcode import create as qrcreate
 from frappe.utils import get_datetime, flt
-from .eway_bill_api import get_eway_pass, get_taxes_type, get_transport_mode, get_eway_distance
+from .eway_bill_api import get_eway_pass, get_taxes_type,get_taxes_type_from_doc, get_transport_mode, get_eway_distance
 from .common import get_base_url, get_aspid_pass, get_default_gstin, get_numeric_state_code, \
     get_gst_pincode, get_gst_based_uom, get_place_of_supply
 TIMEOUT = 10
@@ -579,3 +579,201 @@ def einv_needed(dtype, dname):
         if dtd.gst_category != "Unregistered":
             einv_need = 1
     return einv_need
+
+
+def generate_irn_from_doc(doc):
+    """
+    Optimized IRN generation using an already loaded document.
+    Used by background jobs to avoid repeated frappe.get_doc calls.
+    """
+
+    api = "generate_irn"
+    full_url = get_full_einv_url(api)
+    full_url = add_qr_code_size(url=full_url)
+    headers = get_headers()
+
+    einv_json = generate_einv_json_from_doc(doc)
+
+    try:
+        response = requests.post(
+            url=full_url,
+            headers=headers,
+            data=einv_json,
+            timeout=TIMEOUT
+        )
+        response.raise_for_status()
+
+    except requests.RequestException:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"IRN API Request Failed for {doc.name}"
+        )
+        return
+
+    res = json.loads(response.text)
+
+    if flt(res.get("Status")) == 1:
+        irn_dict = json.loads(res.get("Data"))
+        update_irn_details(doc.doctype, doc.name, irn_dict)
+
+    else:
+        errors = res.get("ErrorDetails") or []
+
+        if errors:
+            error = errors[0]
+        else:
+            frappe.log_error(json.dumps(res, indent=2), "Unknown IRN Error")
+            return
+        if error.get("ErrorCode") == "2150":
+            info_det = res.get("InfoDtls")[0]
+            # CRITICAL FIX: Parse the stringified JSON
+            irn_dict = json.loads(info_det.get("Desc"))
+            update_irn_details(doc.doctype, doc.name, irn_dict)
+
+        else:
+            frappe.log_error(
+                json.dumps(res, indent=2),
+                "IRN Generation Failed"
+            )
+
+
+def generate_einv_json_from_doc(doc):
+    """
+    Generates eInvoice JSON using an already loaded document.
+    """
+
+    einv_dt = frappe._dict({})
+    einv_dt.Title = "GST-India Invoice Document"
+    einv_dt.Description = "GST Invoice format for IRN Generation in INDIA"
+    einv_dt.Version = "1.1"
+
+    pos = get_place_of_supply(doc.doctype, doc.name)
+
+    einv_dt = add_einv_doc_details_from_doc(einv_dt, doc)
+
+    sell_add = doc.company_address
+    buy_add = doc.customer_address
+    ship_add = doc.shipping_address_name
+
+    einv_dt = add_einv_adr_details(einv_dt, sell_add, "seller")
+    einv_dt = add_einv_adr_details(einv_dt, buy_add, "buyer", pos=pos)
+    einv_dt = add_einv_adr_details(einv_dt, ship_add, "ship", port_code=doc.port_code)
+
+    item_list, val_dt = get_einv_item_details_from_doc(doc)
+
+    einv_dt.ItemList = item_list
+    einv_dt.ValDtls = val_dt
+
+    return json.dumps(einv_dt)
+
+
+def get_einv_item_details_from_doc(doc):
+    """
+    Returns item details dictionary for the eInvoice JSON using a loaded document.
+    """
+    itm_lst = []
+    val_dt = frappe._dict({})
+
+    if doc.doctype != "Sales Invoice":
+        frappe.throw(
+            f"e-Invoice Not Supported for {doc.doctype} and Doc No: {doc.name}"
+        )
+
+    tax_details = get_taxes_type_from_doc(doc)
+
+    val_dt.AssVal = round(abs(tax_details.get("tax_val", 0)), 2)
+    val_dt.TotInvVal = round(abs(tax_details.get("tot_val", 0)), 2)
+    val_dt.CgstVal = round(abs(tax_details.get("cgst_amt", 0)), 2)
+    val_dt.SgstVal = round(abs(tax_details.get("sgst_amt", 0)), 2)
+    val_dt.IgstVal = round(abs(tax_details.get("igst_amt", 0)), 2)
+    val_dt.Discount = round(abs(tax_details.get("discount_amt", 0)), 2)
+    val_dt.OthChrg = round(abs(tax_details.get("other_amt", 0)), 2)
+
+    gst_rate = tax_details.get("gst_per", 0)
+    igst_per = tax_details.get("igst_per", 0)
+    cgst_per = tax_details.get("cgst_per", 0)
+    sgst_per = tax_details.get("sgst_per", 0)
+
+    unique_hsns = list(set(row.gst_hsn_code for row in doc.items if row.gst_hsn_code))
+    
+    if unique_hsns:
+        hsn_records = frappe.get_all(
+            "GST HSN Code",
+            filters={"name": ("in", unique_hsns)},
+            fields=["name", "description", "is_service"]
+        )
+    else:
+        hsn_records = []
+    
+    hsn_map = {hsn.name: hsn for hsn in hsn_records}
+
+    for row in doc.items:
+        hsn_doc = hsn_map.get(row.gst_hsn_code)
+        
+        is_ser = "Y" if hsn_doc and flt(hsn_doc.is_service) else "N"
+        prd_desc = hsn_doc.description[:299] if hsn_doc and hsn_doc.description else "Product Description Missing"
+
+        it_row_dict = frappe._dict({})
+
+        it_row_dict.SlNo = str(row.idx)
+        it_row_dict.PrdDesc = prd_desc
+        it_row_dict.IsServc = is_ser
+        it_row_dict.HsnCd = row.gst_hsn_code
+        it_row_dict.Qty = abs(row.qty)
+        it_row_dict.Unit = get_gst_based_uom(row.uom)
+        it_row_dict.UnitPrice = round(row.base_rate, 2)
+        it_row_dict.TotAmt = round(abs(row.base_amount), 2)
+        it_row_dict.AssAmt = round(abs(row.base_amount), 2)
+        it_row_dict.GstRt = gst_rate
+
+        it_row_dict.IgstAmt = abs(round(row.base_amount * (igst_per / 100), 2))
+        it_row_dict.CgstAmt = abs(round(row.base_amount * (cgst_per / 100), 2))
+        it_row_dict.SgstAmt = abs(round(row.base_amount * (sgst_per / 100), 2))
+
+        it_row_dict.TotItemVal = abs(round(row.base_amount * (1 + gst_rate / 100), 2))
+
+        itm_lst.append(it_row_dict)
+
+    return itm_lst, val_dt
+
+
+def add_einv_doc_details_from_doc(einv_dt, doc):
+    """
+    Adds document details to the eInvoice dictionary using a loaded document.
+    """
+
+    if len(doc.name) > 16:
+        frappe.throw(
+            f"Name of {frappe.get_desk_link(doc.doctype, doc.name)} exceeds 16 characters"
+        )
+
+    trans_dt = frappe._dict({})
+    doc_dts = frappe._dict({})
+
+    trans_dt.TaxSch = "GST"
+
+    supply_type = get_einv_supply_type(
+        gst_category=doc.gst_category,
+        exp_type=doc.export_type
+    )
+
+    trans_dt.SupTyp = supply_type
+    trans_dt.RegRev = get_einv_rcm(doc)
+
+    ecom_gstin = get_ecom_gstin()
+    if ecom_gstin:
+        trans_dt.EcmGstin = ecom_gstin
+
+    igst_on_intra = get_igst_on_intra()
+    if igst_on_intra == "Y":
+        trans_dt.IgstOnIntra = igst_on_intra
+
+    einv_dt.TranDtls = trans_dt
+
+    doc_dts.Typ = get_einv_doctype(doc)
+    doc_dts.No = doc.name
+    doc_dts.Dt = doc.posting_date.strftime("%d/%m/%Y")
+
+    einv_dt.DocDtls = doc_dts
+
+    return einv_dt

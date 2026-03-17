@@ -119,35 +119,43 @@ def authenticate_gst_otp(gstin, otp, row_id):
         frappe.throw(f"OTP Validation Failed and Error Message = {auth_resp} and Link = {auth_url}")
 
 
-def check_for_refresh_token(row):
+def check_for_refresh_token(row, settings_doc=None):
     """
-    For a row dict would check if the Auth Token is needed to be refreshed for a GSTIN
+    For a row (Rohit GST Settings.gst_registration_details row) check if token requires refresh.
+    Accepts optional settings_doc to avoid reloading settings inside helpers.
     """
     now_time = datetime.datetime.now()
     token_time = flt(row.update_token_every_mins)
+
     if row.authorization_token and row.api_access_authorized == 1:
         token_update_time = row.validity_of_token - datetime.timedelta(minutes=360) + \
             datetime.timedelta(minutes=token_time)
+
         if token_update_time < now_time < row.validity_of_token:
-            new_auth_token, error_code = refresh_auth_token(row.gst_registration_number,
-                row.authorization_token)
-            if new_auth_token != "":
-                print(f"Auto Updated Auth Token for {row.gst_registration_number}")
-                update_auth_token(row_name=row.name, auth_token=new_auth_token)
+            new_auth_token, error_code = refresh_auth_token(row.gst_registration_number, row.authorization_token)
+
+            if new_auth_token:
+                frappe.logger("gst_api").info(f"Auto Updated Auth Token for {row.gst_registration_number}")
+                # update_auth_token will commit
+                update_auth_token(row_name=row.name, auth_token=new_auth_token, settings_doc=settings_doc)
             else:
-                print(f"Auto Auth Token Update Failed for {row.gst_registration_number}")
-                update_auth_token(row_name=row.name, auth_token="", failed=1, error_code=error_code)
+                frappe.logger("gst_api").warning(f"Auto Auth Token Update Failed for {row.gst_registration_number}")
+                update_auth_token(row_name=row.name, auth_token="", failed=1, error_code=error_code, settings_doc=settings_doc)
+
         elif token_update_time > now_time and row.validity_of_token > now_time:
-            print(f"No Need to Update the Auth Token for {row.gst_registration_number} as Token to \
-                be Updated After {token_update_time}")
+            frappe.logger("gst_api").info(
+                f"No Need to Update the Auth Token for {row.gst_registration_number}; next update after {token_update_time}"
+            )
         else:
-            print(f"Auth Token is Expired and hence Need to Generate OTP Again for \
-                {row.gst_registration_number}")
-            update_auth_token(row_name=row.name, auth_token="", failed=1, error_code='AUTH4037')
+            frappe.logger("gst_api").warning(
+                f"Auth Token is expired for {row.gst_registration_number}; OTP regeneration required"
+            )
+            update_auth_token(row_name=row.name, auth_token="", failed=1, error_code='AUTH4037', settings_doc=settings_doc)
+
     elif row.api_access_authorized != 1:
-        print(f"API Authorization is Unchecked for {row.gst_registration_number}")
+        frappe.logger("gst_api").info(f"API Authorization is unchecked for {row.gst_registration_number}")
     else:
-        print(f"No API Authorization Token for {row.gst_registration_number}")
+        frappe.logger("gst_api").info(f"No API Authorization Token for {row.gst_registration_number}")
 
 
 def refresh_auth_token(gstin, auth_token):
@@ -170,79 +178,86 @@ def refresh_auth_token(gstin, auth_token):
     return refresh_resp, error_code
 
 
-def get_auth_token(gstin):
+def get_auth_token(gstin, settings_doc=None):
     """
-    Gets auth token for a given GSTIN
+    Gets auth token for a given GSTIN. If settings_doc passed, it will be used instead of reloading.
     """
-    found = 0
-    r_set = frappe.get_doc("Rohit GST Settings", "Rohit GST Settings")
+    found = False
     now_time = datetime.datetime.now()
     new_auth_token = ""
+
+    if settings_doc is None:
+        r_set = frappe.get_doc("Rohit GST Settings", "Rohit GST Settings")
+    else:
+        r_set = settings_doc
+
     for row in r_set.gst_registration_details:
         if row.gst_registration_number == gstin:
-            # Updates token after this many mins
             token_update_min = flt(row.update_token_every_mins)
             token_update_time = row.validity_of_token - datetime.timedelta(minutes=360) + \
                 datetime.timedelta(minutes=token_update_min)
-            found = 1
+            found = True
+
             if row.authorization_token and row.api_access_authorized == 1:
                 if token_update_time > now_time and row.validity_of_token > now_time:
                     new_auth_token = row.authorization_token
                 elif token_update_time < now_time < row.validity_of_token:
                     new_auth_token, error_code = refresh_auth_token(gstin=gstin,
                         auth_token=row.authorization_token)
-                    if new_auth_token != "":
-                        update_auth_token(row_name=row.name, auth_token=new_auth_token,
-                            error_code=error_code)
+                    if new_auth_token:
+                        update_auth_token(row_name=row.name, auth_token=new_auth_token, settings_doc=r_set)
                     else:
-                        update_auth_token(row_name=row.name, auth_token="", failed=1,
-                            error_code=error_code)
-                        frappe.throw(f"New Auth Token for {gstin} is Empty you might need to \
-                            Generate OTP Again")
+                        update_auth_token(row_name=row.name, auth_token="", failed=1, error_code=error_code, settings_doc=r_set)
+                        frappe.throw(f"New Auth Token for {gstin} is Empty you might need to Generate OTP Again")
                 else:
-                    update_auth_token(row_name=row.name, auth_token="", failed=1,
-                        error_code="AUTH4037")
-                    frappe.throw(f"Auth Token for {gstin} is Expired you might need to \
-                        Generate OTP Again")
+                    update_auth_token(row_name=row.name, auth_token="", failed=1, error_code="AUTH4037", settings_doc=r_set)
+                    frappe.throw(f"Auth Token for {gstin} is Expired you might need to Generate OTP Again")
             else:
                 frappe.throw(f"Authorization Needed for {gstin}. Resend OTP and Get Authorization")
-    if found == 0:
+
+    if not found:
         frappe.throw(f"{gstin} is Not Setup in Rohit GST Settings for API Access")
+
     return new_auth_token
 
 
-def update_auth_token(row_name, auth_token, failed=0, error_code=None):
+def update_auth_token(row_name, auth_token, failed=0, error_code=None, settings_doc=None):
     """
-    Updates the Auth Token for a Row Name in the GST Registration Details
+    Updates the Auth Token for a Row Name in the GST Registration Details.
+    Commits immediately after update so token state isn't lost if the worker crashes.
     """
     if not error_code:
         error_code = ""
     ecl = ["AUTH4037", "RET11402", "SWEB9033", "AUTH4033", "GSP102"]
+
+    # If failure, clear OTP, maybe disable access and commit
     if failed == 1:
-        # Only Update API Access to zero on certain errors and not all errors
         frappe.db.set_value("GST Registration Details", row_name, "otp", "")
-        if error_code != "" and error_code in ecl:
-            print("Removing API Access")
+        if error_code and error_code in ecl:
+            frappe.logger("gst_api").info(f"Removing API Access for row {row_name} due to error {error_code}")
             frappe.db.set_value("GST Registration Details", row_name, "api_access_authorized", 0)
         else:
-            print(f"Error Code: {str(error_code)} Not in List")
+            frappe.logger("gst_api").info(f"update_auth_token: error code {error_code} not in removal list")
         frappe.db.commit()
+        return
+
+    # Normal successful update: increment counter, set token and validity, commit
+    auth_access = flt(frappe.db.get_value("GST Registration Details", row_name, "api_access_authorized"))
+    exist_token_times = flt(frappe.db.get_value("GST Registration Details", row_name, "no_of_times_token_updated"))
+
+    if auth_access == 1:
+        frappe.db.set_value("GST Registration Details", row_name, "no_of_times_token_updated", exist_token_times + 1)
     else:
-        auth_access = flt(frappe.db.get_value("GST Registration Details", row_name,
-            "api_access_authorized"))
-        exist_token_times = flt(frappe.db.get_value("GST Registration Details", row_name,
-            "no_of_times_token_updated"))
-        if auth_access == 1:
-            frappe.db.set_value("GST Registration Details", row_name, "no_of_times_token_updated",
-                exist_token_times + 1)
-        else:
-            frappe.db.set_value("GST Registration Details", row_name, "no_of_times_token_updated",
-                0)
-        frappe.db.set_value("GST Registration Details", row_name, "api_access_authorized", 1)
-        frappe.db.set_value("GST Registration Details", row_name, "authorization_token", auth_token)
-        frappe.db.set_value("GST Registration Details", row_name, "otp", "")
-        frappe.db.set_value("GST Registration Details", row_name, "validity_of_token",
-                            datetime.datetime.now() + datetime.timedelta(minutes=360))
+        frappe.db.set_value("GST Registration Details", row_name, "no_of_times_token_updated", 0)
+
+    frappe.db.set_value("GST Registration Details", row_name, "api_access_authorized", 1)
+    frappe.db.set_value("GST Registration Details", row_name, "authorization_token", auth_token)
+    frappe.db.set_value("GST Registration Details", row_name, "otp", "")
+    frappe.db.set_value("GST Registration Details", row_name, "validity_of_token",
+                        datetime.datetime.now() + datetime.timedelta(minutes=360))
+
+    # commit immediately so we don't lose the token on crash
+    frappe.db.commit()
 
 
 def get_gst_url(api, action, gstin):
@@ -257,19 +272,23 @@ def get_gst_url(api, action, gstin):
     return gst_url
 
 
-def get_gst_username(gstin):
-    """
-    Get the GST Username from Rohit GST Settings for a given GSTIN
-    """
-    found = 0
+def get_gst_username(gstin, settings_doc=None):
+    found = False
     gst_username = ""
-    r_set = frappe.get_doc("Rohit GST Settings", "Rohit GST Settings")
+    if settings_doc is None:
+        r_set = frappe.get_doc("Rohit GST Settings", "Rohit GST Settings")
+    else:
+        r_set = settings_doc
+
     for row in r_set.gst_registration_details:
         if row.gst_registration_number == gstin:
-            found = 1
+            found = True
             gst_username = row.gst_username
-    if found == 0:
+            break
+
+    if not found:
         frappe.throw(f"No GSTIN username found for {gstin}")
+
     return gst_username
 
 

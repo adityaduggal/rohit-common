@@ -381,6 +381,55 @@ def get_taxes_type(dtype, dname):
     taxes_dict["tot_val"] = doc.base_grand_total
     return taxes_dict
 
+def get_taxes_type_from_doc(doc):
+    """
+    Optimized version of get_taxes_type that accepts a loaded document object.
+    Preserves exact matching against GST Settings and handles base_tax_amount correctly.
+    """
+    gst_per = 0
+    taxes_dict = {
+        "other_amt": 0,
+        "cgst_amt": 0, "cgst_per": 0,
+        "sgst_amt": 0, "sgst_per": 0,
+        "igst_amt": 0, "igst_per": 0,
+        "discount_amt": 0
+    }
+    
+    gset = frappe.get_single('GST Settings')
+    
+    for tax in doc.taxes:
+        found = 0
+        for acc in gset.gst_accounts:
+            if tax.account_head == acc.cgst_account:
+                found = 1
+                taxes_dict["cgst_amt"] = tax.base_tax_amount
+                taxes_dict["cgst_per"] = tax.rate
+                gst_per += tax.rate
+                break
+            elif tax.account_head == acc.sgst_account:
+                found = 1
+                taxes_dict["sgst_amt"] = tax.base_tax_amount
+                taxes_dict["sgst_per"] = tax.rate
+                gst_per += tax.rate
+                break
+            elif tax.account_head == acc.igst_account:
+                found = 1
+                taxes_dict["igst_amt"] = tax.base_tax_amount
+                taxes_dict["igst_per"] = tax.rate
+                gst_per += tax.rate
+                break
+                
+        if found == 0:
+            if tax.description and re.search('discount', tax.description, re.IGNORECASE):
+                taxes_dict["discount_amt"] = tax.base_tax_amount
+            else:
+                taxes_dict["other_amt"] += tax.base_tax_amount
+                
+    taxes_dict["gst_per"] = gst_per
+    taxes_dict["tax_val"] = doc.base_net_total
+    taxes_dict["tot_val"] = doc.base_grand_total
+    
+    return taxes_dict
 
 def get_items_table(data, tbl_dict):
     """

@@ -168,35 +168,36 @@ doc_events = {
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-#     "cron": {
-#         "10 2 * * *": [
-#             "rohit_common.rohit_common.scheduled_tasks.auto_update_gstin_status.enqueue_gstin_update"
-#             # Runs everyday at 2:10 AM
-#         ],
-#         # Runs every 15 mins below jobs
-#         "*/15 * * * *": [
-#             "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.enq_inv_sub",
-#             "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.enq_einv_create",
-#         ],
-#     },
-#     "all": [
-#         "rohit_common.rohit_common.scheduled_tasks.auto_refresh_gstin_auth_code.execute"
-#     ],
-#     "daily": [
-#         "rohit_common.rohit_common.scheduled_tasks.auto_update_from_erp.update_export_invoices"
-#     ],
-#     "hourly": [
-#         "rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files.check_correct_folders",
-#         "rohit_common.utils.background_doc_processing.enqueue_bg",
-#     ],
-#     "weekly_long": [
-#         "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.get_unposted_invoices",
-#         "rohit_common.rohit_common.scheduled_tasks.auto_delete_version.enqueue_deletion",
-#         "rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files.execute",
-#     ],
-#     "monthly": ["rohit_common.rohit_common.scheduled_tasks.email_queue_delete.execute"],
-# }
+scheduler_events = {
+    "cron": {
+        "10 2 * * *": [
+            "rohit_common.rohit_common.scheduled_tasks.auto_update_gstin_status.enqueue_gstin_update"
+            # Runs everyday at 2:10 AM
+        ],
+        # Runs every 15 mins below jobs
+        "*/15 * * * *": [
+            "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.enq_inv_sub",
+            "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.enq_einv_create",
+        ],
+    },
+    "all": [
+        "rohit_common.rohit_common.scheduled_tasks.auto_refresh_gstin_auth_code.execute"
+    ],
+    "daily": [
+        "rohit_common.rohit_common.scheduled_tasks.auto_update_from_erp.update_export_invoices"
+    ],
+    "hourly": [
+        "rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files.check_correct_folders",
+        "rohit_common.utils.background_doc_processing.enqueue_bg",
+    ],
+    "weekly_long": [
+        "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.get_unposted_invoices",
+        "rohit_common.rohit_common.scheduled_tasks.auto_delete_version.enqueue_deletion",
+        "rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files.execute",
+    ],
+    # No need for an email queue cleanup job it is handled automatically by Frappe.
+    # "monthly": ["rohit_common.rohit_common.scheduled_tasks.email_queue_delete.execute"],
+}
 
 # Testing
 # -------

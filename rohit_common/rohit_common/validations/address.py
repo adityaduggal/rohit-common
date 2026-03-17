@@ -325,12 +325,14 @@ def update_fields_from_gmaps(doc, address_dict):
         remove_google_updates(doc)
 
 
-def validate_gstin_from_portal(doc):
+def validate_gstin_from_portal(doc,auto_days=None):
     """
     Validates GSTIN using India Compliance Public API
     """
-    auto_days = flt(frappe.get_value("Rohit Settings", "Rohit Settings",
-        "auto_validate_gstin_after"))
+    if auto_days is None:
+        auto_days = flt(
+            frappe.db.get_single_value("Rohit Settings", "auto_validate_gstin_after")
+        )
     if doc.gst_validation_date:
         days_since_validation = (date.today() - getdate(doc.gst_validation_date)).days
     else:
