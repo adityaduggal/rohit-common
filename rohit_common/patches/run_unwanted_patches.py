@@ -8,6 +8,8 @@ def run_unwanted_patches():
 		update_icons_in_customized_desk_pages()
 		rename_desk_page_to_workspace()
 		setup_likes_from_feedback()
+        # skip_notification_channel_patch()
+        # skip_update_reports_with_range()
 
 		#erpnext
 		update_is_cancelled_field()
@@ -117,3 +119,19 @@ def execute_rename_tds_report():
 		'patch': 'execute:frappe.rename_doc("Report", "TDS Payable Monthly", "Tax Withholding Details", force=True)',
 	}).insert(ignore_permissions=True)
 	frappe.db.commit()
+# def skip_notification_channel_patch():
+#     if not frappe.db.exists("Patch Log", {"patch": "frappe.patches.v13_0.update_notification_channel_if_empty"}):
+#         frappe.get_doc({
+#             "doctype": "Patch Log",
+#             "patch": "frappe.patches.v13_0.update_notification_channel_if_empty",
+#         }).insert(ignore_permissions=True)
+#         frappe.db.commit()
+
+
+# def skip_update_reports_with_range():
+#     if not frappe.db.exists("Patch Log", {"patch": "erpnext.patches.v14_0.update_reports_with_range"}):
+#         frappe.get_doc({
+#             "doctype": "Patch Log",
+#             "patch": "erpnext.patches.v14_0.update_reports_with_range",
+#         }).insert(ignore_permissions=True)
+#         frappe.db.commit()
