@@ -483,180 +483,118 @@ class ClearTaxImport(Gstr1Report):
         if not self.invoices:
             return
 
-        self.tax_details = frappe.db.sql(
-            """
+        # Pre-cache GST accounts into distinct sets for O(1) lookups
+        cgst_sgst_accs = set(
+            self.gst_accounts.get("cgst_account", []) + 
+            self.gst_accounts.get("sgst_account", [])
+        )
+        igst_accs = set(self.gst_accounts.get("igst_account", []))
+        cess_accs = set(self.gst_accounts.get("cess_account", []))
+
+        tax_details = frappe.db.sql("""
             select parent, account_head, item_wise_tax_detail, base_tax_amount_after_discount_amount
             from `tab%s` where parenttype = %%s and docstatus = 1 and parent in (%s)
             order by account_head
-        """
-            % (
-                self.tax_doctype,
-                ", ".join(["%s"] * len(self.invoices.keys())),
-            ),
-            tuple([self.doctype] + list(self.invoices.keys())),
-        )
+        """ % (self.tax_doctype, ", ".join(["%s"] * len(self.invoices))),
+        tuple([self.doctype] + list(self.invoices.keys())), as_dict=1)
 
         self.items_based_on_tax_rate = {}
         self.invoice_cess = frappe._dict()
-        self.cgst_sgst_invoices = []
+        self.cgst_sgst_invoices = set()
 
-        for parent, account, item_wise_tax_detail, tax_amount in self.tax_details:
+        # Optimize JSON parsing by caching
+        json_load = json.loads
+
+        for d in tax_details:
+            parent, account = d.parent, d.account_head
+            
             # Handle Cess separately
-            if account in self.gst_accounts.cess_account:
-                self.invoice_cess.setdefault(parent, 0.0)
-                self.invoice_cess[parent] += flt(tax_amount)
-                continue  # Skip Cess rows for Rate grouping
+            if account in cess_accs:
+                self.invoice_cess[parent] = self.invoice_cess.get(parent, 0.0) + flt(d.base_tax_amount_after_discount_amount)
+                continue
 
-            # Strict GST Account check to ignore freight/other charges
+            # Strict GST Account check
             is_cgst_sgst = False
-            if (
-                account in self.gst_accounts.cgst_account
-                or account in self.gst_accounts.sgst_account
-            ):
+            acct_lower = account.lower()
+            
+            if account in cgst_sgst_accs or "cgst" in acct_lower or "sgst" in acct_lower:
                 is_cgst_sgst = True
-            elif account in self.gst_accounts.igst_account:
+            elif account in igst_accs or "igst" in acct_lower:
                 pass
             else:
-                acct_lower = account.lower()
-                if "cgst" in acct_lower or "sgst" in acct_lower:
-                    is_cgst_sgst = True
-                elif "igst" in acct_lower:
-                    pass
-                else:
-                    # Non-GST tax row → ignore
-                    continue
+                # Non-GST tax row → ignore
+                continue
 
-            if item_wise_tax_detail:
+            if d.item_wise_tax_detail:
                 try:
-                    detail = json.loads(item_wise_tax_detail)
-
+                    detail = json_load(d.item_wise_tax_detail)
                     for item_key, tax_amounts in detail.items():
                         if isinstance(tax_amounts, dict):
-                            tax_rate = flt(
-                                tax_amounts.get("tax_rate")
-                                or tax_amounts.get("rate")
-                                or 0
-                            )
+                            tax_rate = flt(tax_amounts.get("tax_rate") or tax_amounts.get("rate") or 0)
                         elif isinstance(tax_amounts, (list, tuple)):
                             tax_rate = flt(tax_amounts[0])
                         else:
                             tax_rate = 0.0
 
                         if tax_rate > 0:
-                            # For CGST+SGST, table stores half rate; convert to total
                             if is_cgst_sgst:
                                 tax_rate *= 2
-                                if parent not in self.cgst_sgst_invoices:
-                                    self.cgst_sgst_invoices.append(parent)
+                                self.cgst_sgst_invoices.add(parent)
 
-                            rate_based_dict = (
-                                self.items_based_on_tax_rate.setdefault(parent, {})
-                                .setdefault(tax_rate, [])
-                            )
-                            if item_key not in rate_based_dict:
-                                rate_based_dict.append(item_key)
-                except ValueError:
-                    # bad JSON, ignore
+                            self.items_based_on_tax_rate.setdefault(parent, {}).setdefault(tax_rate, set()).add(item_key)
+                except (ValueError, TypeError):
                     pass
 
-        # --- Add 0-rated invoices (imports/exempt) not present in tax table ---
+        # Add 0-rated invoices
         if hasattr(self, "invoice_items"):
             for inv, items in self.invoice_items.items():
                 if inv not in self.items_based_on_tax_rate:
                     if self.doctype == "Sales Invoice":
-                        keys = list(items.keys())  # dict
+                        self.items_based_on_tax_rate.setdefault(inv, {})[0.0] = set(items.keys())
                     else:
-                        keys = list({x["key"] for x in items})  # list of dicts
-                    self.items_based_on_tax_rate.setdefault(inv, {}).setdefault(
-                        0.0, keys
-                    )
+                        self.items_based_on_tax_rate.setdefault(inv, {})[0.0] = {x["key"] for x in items}
 
     # ----------------------------------------------------------------------
-    # DATA BUILD (doctype-specific)
+    # DATA BUILD
     # ----------------------------------------------------------------------
     def get_data_custom(self):
-        if self.doctype == "Sales Invoice":
-            # Use Sales logic with _append_row (handles 0-rate suppress/export logic)
-            for inv, items_based_on_rate in self.items_based_on_tax_rate.items():
+        is_sales = self.doctype == "Sales Invoice"
+        
+        for inv, items_based_on_rate in self.items_based_on_tax_rate.items():
+            if is_sales:
                 self._append_row(inv, items_based_on_rate)
-        else:
-            # Use Purchase logic (rate-aware filtering)
-            for inv, items_based_on_rate in self.items_based_on_tax_rate.items():
+            else:
                 invoice_details = self.invoices.get(inv)
+                if not invoice_details: continue
+                
+                is_return = flt(invoice_details.get("is_return")) == 1 or invoice_details.get("return_against")
+                inv_items = self.invoice_items.get(inv, [])
+                
                 for rate, item_keys in items_based_on_rate.items():
-                    row = []
-
-                    is_return = (
-                        flt(invoice_details.get("is_return")) == 1
-                        or invoice_details.get("return_against")
+                    # Optimization: Filter items once per rate
+                    filtered_taxable = sum(
+                        item["value"] for item in inv_items 
+                        if item["key"] in item_keys and (abs(item["item_rate"] - rate) < 0.1 or (rate == 0 and item["item_rate"] == 0))
                     )
 
-                    def val_format(v):
-                        return abs(flt(v)) if is_return else flt(v)
+                    if filtered_taxable == 0 and any(x["item_rate"] != 0 for x in inv_items):
+                        continue
 
-                    # invoice-level fields
-                    for fieldname in self.invoice_fields:
-                        if fieldname == "invoice_value":
-                            val = (
-                                invoice_details.base_rounded_total
-                                or invoice_details.base_grand_total
-                            )
-                            row.append(flt(val))  # keep sign
-                        elif fieldname in (
-                            "posting_date",
-                            "bill_date",
-                            "shipping_bill_date",
-                        ):
-                            val = invoice_details.get(fieldname)
-                            row.append(formatdate(val, "dd-MMM-YY") if val else None)
-                        elif fieldname == "export_type":
-                            val = (
-                                "WPAY"
-                                if invoice_details.get(fieldname)
-                                == "With Payment of Tax"
-                                else "WOPAY"
-                            )
-                            row.append(val)
-                        else:
-                            row.append(invoice_details.get(fieldname))
-
-                    # --- FILTER ITEMS BY RATE ---
-                    taxable_value = 0.0
-                    inv_items = self.invoice_items.get(inv, [])
-
-                    for item_data in inv_items:
-                        if item_data["key"] in item_keys:
-                            # allow minor float diff
-                            if abs(item_data["item_rate"] - rate) < 0.1:
-                                taxable_value += item_data["value"]
-                            # special case for 0-rate bucket
-                            elif rate == 0 and item_data["item_rate"] == 0:
-                                taxable_value += item_data["value"]
-
-                    tax_amount = taxable_value * rate / 100.0
-
-                    # If filtered taxable value is 0, skip row unless invoice is purely 0-rate
-                    if taxable_value == 0:
-                        all_rates_zero = all(
-                            x["item_rate"] == 0 for x in inv_items
-                        ) or not inv_items
-                        if not all_rates_zero:
-                            continue
-
-                    row += [rate, val_format(taxable_value)]
-
+                    row = self._build_invoice_base_row(invoice_details, is_return)
+                    
+                    tax_amount = filtered_taxable * rate / 100.0
+                    val_fmt = lambda v: abs(flt(v)) if is_return else flt(v)
+                    
+                    row += [rate, val_fmt(filtered_taxable)]
+                    
                     if inv in self.cgst_sgst_invoices:
-                        row += [
-                            0.0,
-                            val_format(tax_amount / 2.0),
-                            val_format(tax_amount / 2.0),
-                        ]
+                        row += [0.0, val_fmt(tax_amount / 2.0), val_fmt(tax_amount / 2.0)]
                     else:
-                        row += [val_format(tax_amount), 0.0, 0.0]
+                        row += [val_fmt(tax_amount), 0.0, 0.0]
 
-                    row += [val_format(self.invoice_cess.get(inv, 0.0))]
-
-                    # Purchase-specific ITC cols
+                    row += [val_fmt(self.invoice_cess.get(inv, 0.0))]
+                    
+                    # Purchase ITC Columns
                     row += [
                         invoice_details.get("eligibility_for_itc") or "All Other ITC",
                         invoice_details.get("itc_integrated_tax"),
@@ -664,20 +602,26 @@ class ClearTaxImport(Gstr1Report):
                         invoice_details.get("itc_state_tax"),
                         invoice_details.get("itc_cess_amount"),
                     ]
-
-                    # CDNR flags (if used for purchase CDNR)
+                    
                     if self.filters.get("type_of_business") == "CDNR":
-                        row.append(
-                            "Y"
-                            if getdate(invoice_details.posting_date)
-                            <= date(2017, 7, 1)
-                            else "N"
-                        )
-                        row.append(
-                            "C" if invoice_details.return_against else "R"
-                        )
+                        row += ["Y" if getdate(invoice_details.posting_date) <= date(2017, 7, 1) else "N",
+                                "C" if invoice_details.return_against else "R"]
 
                     self.data.append(row)
+
+    def _build_invoice_base_row(self, details, is_return):
+        row = []
+        for fieldname in self.invoice_fields:
+            if fieldname == "invoice_value":
+                row.append(flt(details.base_rounded_total or details.base_grand_total))
+            elif fieldname in ("posting_date", "bill_date", "shipping_bill_date"):
+                val = details.get(fieldname)
+                row.append(formatdate(val, "dd-MMM-YY") if val else None)
+            elif fieldname == "export_type":
+                row.append("WPAY" if details.get(fieldname) == "With Payment of Tax" else "WOPAY")
+            else:
+                row.append(details.get(fieldname))
+        return row
 
     # ----------------------------------------------------------------------
     # SALES helper (unchanged from your Sales working version)

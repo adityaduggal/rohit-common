@@ -213,7 +213,7 @@ def get_gl_entries(filters, accounting_dimensions):
         as_dict=1,
     )
 
-    party_name_map = get_party_name_map()
+    party_name_map = get_party_name_map(gl_entries)
 
     for gl_entry in gl_entries:
         if gl_entry.party_type and gl_entry.party:
@@ -322,46 +322,72 @@ def get_conditions(filters):
     return " and {}".format(" and ".join(conditions)) if conditions else ""
 
 
-def get_party_name_map():
-    party_map = {}
+def get_party_name_map(gl_entries):
+	party_map = {}
+	party_to_fetch = {}
 
-    customers = frappe.get_all("Customer", fields=["name", "customer_name"])
-    party_map["Customer"] = {c.name: c.customer_name for c in customers}
+	# Collect only parties present in the current GL entries
+	for g in gl_entries:
+		if g.party_type and g.party:
+			party_to_fetch.setdefault(g.party_type, set()).add(g.party)
 
-    suppliers = frappe.get_all("Supplier", fields=["name", "supplier_name"])
-    party_map["Supplier"] = {s.name: s.supplier_name for s in suppliers}
+	# Bulk fetch names only for relevant parties
+	for party_type, parties in party_to_fetch.items():
+		if not parties:
+			continue
+			
+		name_field = "name"
+		if party_type == "Customer":
+			name_field = "customer_name"
+		elif party_type == "Supplier":
+			name_field = "supplier_name"
+		elif party_type == "Employee":
+			name_field = "employee_name"
+		else:
+			# Fallback for other party types
+			meta = frappe.get_meta(party_type)
+			if meta.has_field(frappe.scrub(party_type) + "_name"):
+				name_field = frappe.scrub(party_type) + "_name"
 
-    employees = frappe.get_all("Employee", fields=["name", "employee_name"])
-    party_map["Employee"] = {e.name: e.employee_name for e in employees}
-    return party_map
+		party_data = frappe.get_all(party_type, 
+			filters={"name": ["in", list(parties)]}, 
+			fields=["name", name_field])
+			
+		party_map[party_type] = {p.name: p.get(name_field) for p in party_data}
+
+	return party_map
 
 
 def get_accounts_with_children(accounts):
-    if not isinstance(accounts, list):
-        accounts = [d.strip() for d in accounts.strip().split(",") if d]
+	if not isinstance(accounts, list):
+		accounts = [d.strip() for d in accounts.strip().split(",") if d]
 
-    if not accounts:
-        return
+	if not accounts:
+		return
 
-    doctype = frappe.qb.DocType("Account")
-    accounts_data = (
-        frappe.qb.from_(doctype)
-        .select(doctype.lft, doctype.rgt)
-        .where(doctype.name.isin(accounts))
-        .run(as_dict=True)
-    )
+	doctype = frappe.qb.DocType("Account")
+	accounts_data = (
+		frappe.qb.from_(doctype)
+		.select(doctype.lft, doctype.rgt)
+		.where(doctype.name.isin(accounts))
+		.run(as_dict=True)
+	)
 
-    conditions = []
-    for account in accounts_data:
-        conditions.append((doctype.lft >= account.lft) & (doctype.rgt <= account.rgt))
+	conditions = []
+	for account in accounts_data:
+		conditions.append((doctype.lft >= account.lft) & (doctype.rgt <= account.rgt))
 
-    return frappe.qb.from_(doctype).select(doctype.name).where(Criterion.any(conditions)).run(pluck=True)
+	return frappe.qb.from_(doctype).select(doctype.name).where(Criterion.any(conditions)).run(pluck=True)
 
 
 def set_bill_no(gl_entries):
-    inv_details = get_supplier_invoice_details()
-    for gl in gl_entries:
-        gl["bill_no"] = inv_details.get(gl.get("against_voucher"), "")
+	vouchers = [g.get("against_voucher") for g in gl_entries if g.get("against_voucher")]
+	if not vouchers:
+		return
+
+	inv_details = get_supplier_invoice_details(vouchers)
+	for gl in gl_entries:
+		gl["bill_no"] = inv_details.get(gl.get("against_voucher"), "")
 
 
 def get_translated_labels_for_totals():
@@ -610,11 +636,16 @@ def get_result_as_list(data, filters):
     return data
 
 
-def get_supplier_invoice_details():
+def get_supplier_invoice_details(vouchers):
     inv_details = {}
+    if not vouchers:
+        return inv_details
+        
     for d in frappe.db.sql(
         """ select name, bill_no from `tabPurchase Invoice`
-        where docstatus = 1 and bill_no is not null and bill_no != '' """,
+        where docstatus = 1 and bill_no is not null and bill_no != ''
+        and name in ({0}) """.format(", ".join(["%s"] * len(vouchers))),
+        tuple(vouchers),
         as_dict=1,
     ):
         inv_details[d.name] = d.bill_no

@@ -10,8 +10,8 @@ from ....utils.contact_utils import get_contact_phones, get_contact_emails
 
 
 def execute(filters=None):
-    conditions, tbl_join, fd_add = get_conditions(filters)
-    data = get_entries(filters, conditions, tbl_join, fd_add)
+    conditions, tbl_join, fd_add, params = get_conditions(filters)
+    data = get_entries(filters, conditions, tbl_join, fd_add, params)
     columns, data = get_columns(filters, data)
 
     return columns, data
@@ -21,169 +21,170 @@ def get_columns(filters, data):
     new_data = []
     if filters.get("type") == "Address":
         col_map = [
-            {"fieldname": "name", "label": f"{filters.get('type')} Link", "fieldtype":"Link",
-                "options":f"{filters.get('type')}", "width": 100},
-            {"fieldname": "address_type", "label": "Address Type", "fieldtype":"", "options":""},
-            {"fieldname": "address_title", "label": "Address Title", "fieldtype":"", "options":""},
-            {"fieldname": "address_line1", "label": "Address Line1", "fieldtype":"", "options":""},
-            {"fieldname": "address_line2", "label": "Address Line2", "fieldtype":"", "options":""},
-            {"fieldname": "city", "label": "City", "fieldtype":"", "options":""},
-            {"fieldname": "state", "label": "State", "fieldtype":"", "option":""},
-            {"fieldname": "country", "label": "Country", "fieldtype":"Link", "options":"Country"},
-            {"fieldname": "airport", "label": "Airport", "fieldtype":"", "options":""},
-            {"fieldname": "sea_port", "label": "Sea Port", "fieldtype":"", "options":""},
-            {"fieldname": "email_id", "label": "Email", "fieldtype":"", "options":""},
-            {"fieldname": "phone", "label": "Phone", "fieldtype":"", "option":""},
-            {"fieldname": "fax", "label": "Fax", "fieldtype":"", "options":""},
-            {"fieldname": "gstin", "label": "GSTIN", "fieldtype":"", "options":""},
-            {"fieldname": "gst_status", "label": "GST Status", "fieldtype":"", "options":""},
-            {"fieldname": "gst_validation_date", "label": "Validation Date", "fieldtype":"Date",
-                "options":"", "width": 80},
-            {"fieldname": "global_google_code", "label": "Google Code", "fieldtype":"", "options":""},
-            {"fieldname": "disabled", "label": "Disabled", "fieldtype":"Int", "options":"",
-                "width": 20},
-            {"fieldname": "link_doctype", "label": "Master Type", "fieldtype":"", "options":""},
-            {"fieldname": "link_name", "label": "Master Name", "fieldtype":"Dynamic Link",
-                "options":"link_doctype"}
+            {"fieldname": "name", "label": "Address Link", "fieldtype":"Link", "options":"Address", "width": 120},
+            {"fieldname": "address_type", "label": "Address Type", "fieldtype":"Data", "width": 100},
+            {"fieldname": "address_title", "label": "Address Title", "fieldtype":"Data", "width": 120},
+            {"fieldname": "address_line1", "label": "Address Line1", "fieldtype":"Data", "width": 150},
+            {"fieldname": "address_line2", "label": "Address Line2", "fieldtype":"Data", "width": 120},
+            {"fieldname": "city", "label": "City", "fieldtype":"Data", "width": 100},
+            {"fieldname": "state", "label": "State", "fieldtype":"Data", "width": 100},
+            {"fieldname": "country", "label": "Country", "fieldtype":"Link", "options":"Country", "width": 100},
+            {"fieldname": "airport", "label": "Airport", "fieldtype":"Data", "width": 100},
+            {"fieldname": "sea_port", "label": "Sea Port", "fieldtype":"Data", "width": 100},
+            {"fieldname": "email_id", "label": "Email", "fieldtype":"Data", "width": 150},
+            {"fieldname": "phone", "label": "Phone", "fieldtype":"Data", "width": 120},
+            {"fieldname": "fax", "label": "Fax", "fieldtype":"Data", "width": 100},
+            {"fieldname": "gstin", "label": "GSTIN", "fieldtype":"Data", "width": 140},
+            {"fieldname": "gst_status", "label": "GST Status", "fieldtype":"Data", "width": 100},
+            {"fieldname": "gst_validation_date", "label": "Validation Date", "fieldtype":"Date", "width": 100},
+            {"fieldname": "global_google_code", "label": "Google Code", "fieldtype":"Data", "width": 120},
+            {"fieldname": "disabled", "label": "Disabled", "fieldtype":"Check", "width": 80},
+            {"fieldname": "link_doctype", "label": "Master Type", "fieldtype":"Data", "width": 120},
+            {"fieldname": "link_name", "label": "Master Name", "fieldtype":"Dynamic Link", "options":"link_doctype", "width": 120}
         ]
     else:
         col_map = [
-            {"fieldname": "name", "label": f"{filters.get('type')} Link", "fieldtype":"Link",
-                "options":f"{filters.get('type')}", "width": 100},
-            {"fieldname": "salutation", "label": "Salutation", "fieldtype":"", "options":"",
-                "width": 30},
-            {"fieldname": "first_name", "label": "First Name", "fieldtype":"", "options":""},
-            {"fieldname": "middle_name", "label": "Middle Name", "fieldtype":"", "options":""},
-            {"fieldname": "last_name", "label": "Last Name", "fieldtype":"", "options":""},
-            {"fieldname": "phone", "label": "Phone", "fieldtype":"", "options":""},
-            {"fieldname": "email", "label": "Email", "fieldtype":"", "options":""},
-            {"fieldname": "designation", "label": "Designation", "fieldtype":"", "option":""},
-            {"fieldname": "department", "label": "Department", "fieldtype":"", "option":""},
-            {"fieldname": "birthday", "label": "Birthday", "fieldtype":"Date", "options":"",
-                "width": 80},
-            {"fieldname": "anniversary", "label": "Anniversary", "fieldtype":"Date", "options":"",
-                "width":80},
-            {"fieldname": "notes", "label": "Notes", "fieldtype":"", "option":""},
-            {"fieldname": "is_primary_contact", "label": "Primary", "fieldtype":"Int", "options":"",
-                "width": 20},
-            {"fieldname": "link_doctype", "label": "Master Type", "fieldtype":"", "options":""},
-            {"fieldname": "link_name", "label": "Master Name", "fieldtype":"Dynamic Link",
-                "options":"link_doctype"},
-            {"fieldname": "gender", "label": "Gender", "fieldtype":"", "options":""}
+            {"fieldname": "name", "label": "Contact Link", "fieldtype":"Link", "options":"Contact", "width": 120},
+            {"fieldname": "salutation", "label": "Salutation", "fieldtype":"Data", "width": 100},
+            {"fieldname": "first_name", "label": "First Name", "fieldtype":"Data", "width": 120},
+            {"fieldname": "middle_name", "label": "Middle Name", "fieldtype":"Data", "width": 100},
+            {"fieldname": "last_name", "label": "Last Name", "fieldtype":"Data", "width": 120},
+            {"fieldname": "phone", "label": "Phone", "fieldtype":"Data", "width": 150},
+            {"fieldname": "email", "label": "Email", "fieldtype":"Data", "width": 200},
+            {"fieldname": "designation", "label": "Designation", "fieldtype":"Data", "width": 120},
+            {"fieldname": "department", "label": "Department", "fieldtype":"Data", "width": 120},
+            {"fieldname": "birthday", "label": "Birthday", "fieldtype":"Date", "width": 100},
+            {"fieldname": "anniversary", "label": "Anniversary", "fieldtype":"Date", "width": 100},
+            {"fieldname": "notes", "label": "Small Text", "fieldtype":"Small Text", "width": 150},
+            {"fieldname": "is_primary_contact", "label": "Primary", "fieldtype":"Check", "width": 80},
+            {"fieldname": "link_doctype", "label": "Master Type", "fieldtype":"Data", "width": 120},
+            {"fieldname": "link_name", "label": "Master Name", "fieldtype":"Dynamic Link", "options":"link_doctype", "width": 120},
+            {"fieldname": "gender", "label": "Gender", "fieldtype":"Data", "width": 100}
         ]
+    
     if filters.get("customer_group"):
-        cg_fd = {"fieldname": "customer_group", "label": "Cust Group", "fieldtype":"Link",
-                    "options":"Customer Group"}
-        col_map.append(cg_fd.copy())
+        col_map.append({"fieldname": "customer_group", "label": "Cust Group", "fieldtype":"Link", "options":"Customer Group", "width": 120})
     if filters.get("territory"):
-        terr_fd = {"fieldname": "territory", "label": "Territory", "fieldtype":"Link",
-                    "options":"Territory"}
-        col_map.append(terr_fd.copy())
+        col_map.append({"fieldname": "territory", "label": "Territory", "fieldtype":"Link", "options":"Territory", "width": 120})
     
     if not data:
         return col_map, []
 
-    drop_cols = []
-    col_size = []
-    cols = frappe._dict({})
-    
-    for key in data[0].keys():
-        mlen = 0
-        for d in data:
-            if d.get(key):
-                if isinstance(d.get(key), (datetime.date, int, float)):
-                    ex_len = 4
-                else:
-                    ex_len = len(d.get(key))
-            else:
-                ex_len = 0
-            if ex_len > mlen:
-                mlen = ex_len
-        cols["fieldname"] = key
-        cols["width"] = mlen
-        col_size.append(cols.copy())
-        if mlen == 0:
-            drop_cols.append(key)
-    for d in col_map:
-        for e in col_size:
-            if d["fieldname"] == e["fieldname"]:
-                if d.get("width", 0) == 0:
-                    d["width"] = min(e["width"] * 10, 200)
-    for col in col_map:
-        if col.get("width") == 0:
-            col_map.remove(col)
+    # Efficient O(N) single-pass width and empty-column check
+    max_lengths = {col["fieldname"]: 0 for col in col_map}
     for row in data:
-        drow = []
-        for fd in col_map:
-            drow.append(row.get(fd.get("fieldname")))
-        new_data.append(drow)
+        for col in col_map:
+            val = row.get(col["fieldname"])
+            if val:
+                w = len(str(val))
+                if w > max_lengths[col["fieldname"]]:
+                    max_lengths[col["fieldname"]] = w
 
-    return col_map, new_data
+    # Filter out empty columns and update widths dynamically
+    final_cols = []
+    for col in col_map:
+        mlen = max_lengths[col["fieldname"]]
+        if mlen > 0:
+            # Dynamically adjust width if content is longer than default
+            calc_w = min(mlen * 10, 300)
+            col["width"] = max(col.get("width", 100), calc_w)
+            final_cols.append(col)
+
+    # Build final data list efficiently based on filtered columns
+    for row in data:
+        new_data.append([row.get(col["fieldname"]) for col in final_cols])
+
+    return final_cols, new_data
 
 
-def get_entries(filters, conditions, tbl_join, fd_add):
+def get_entries(filters, conditions, tbl_join, fd_add, params):
     data = []
     if filters.get("type") == "Address":
         if filters.get("orphaned") != 1:
-            query = f"""SELECT ad.name, ad.address_title, ad.address_type, ad.address_line1,
-            ad.address_line2, ad.city, ad.state, ad.country, ad.pincode, ad.sea_port, ad.airport,
-            ad.email_id, ad.phone, ad.fax, ad.gstin, ad.disabled, dl.link_doctype, dl.link_name,
-            ad.global_google_code, ad.gst_status, ad.gst_validation_date, ad.latitude, ad.longitude
-            {fd_add}
-            FROM `tabAddress` ad, `tabDynamic Link` dl {tbl_join}
-            WHERE dl.parenttype = 'Address' AND dl.parent = ad.name {conditions}
-            ORDER BY dl.link_doctype, dl.link_name, ad.name"""
+            query = f"""
+                SELECT 
+                    ad.name, ad.address_title, ad.address_type, ad.address_line1,
+                    ad.address_line2, ad.city, ad.state, ad.country, ad.pincode, ad.sea_port, ad.airport,
+                    ad.email_id, ad.phone, ad.fax, ad.gstin, ad.disabled, dl.link_doctype, dl.link_name,
+                    ad.global_google_code, ad.gst_status, ad.gst_validation_date, ad.latitude, ad.longitude
+                    {fd_add}
+                FROM `tabAddress` ad
+                INNER JOIN `tabDynamic Link` dl ON dl.parent = ad.name
+                {tbl_join}
+                WHERE dl.parenttype = 'Address' {conditions}
+                ORDER BY dl.link_doctype, dl.link_name, ad.name
+            """
         else:
-            query = f"""SELECT ad.name, ad.address_title, ad.address_type, ad.address_line1,
-            ad.address_line2, ad.city, ad.state, ad.country, ad.pincode, ad.sea_port, ad.airport,
-            ad.email_id, ad.phone, ad.fax, ad.gstin, ad.disabled, ad.global_google_code,
-            ad.gst_status, ad.gst_validation_date
-            FROM `tabAddress` ad
-            WHERE ad.name NOT IN (SELECT parent FROM `tabDynamic Link` WHERE parenttype = 'Address'
-                GROUP BY parent)
-            ORDER BY ad.name"""
+            query = """
+                SELECT 
+                    ad.name, ad.address_title, ad.address_type, ad.address_line1,
+                    ad.address_line2, ad.city, ad.state, ad.country, ad.pincode, ad.sea_port, ad.airport,
+                    ad.email_id, ad.phone, ad.fax, ad.gstin, ad.disabled, ad.global_google_code,
+                    ad.gst_status, ad.gst_validation_date
+                FROM `tabAddress` ad
+                WHERE ad.name NOT IN (SELECT parent FROM `tabDynamic Link` WHERE parenttype = 'Address' GROUP BY parent)
+                ORDER BY ad.name
+            """
     else:
         if filters.get("orphaned") != 1:
-            query = f"""SELECT con.name,
-            IF(TRIM(con.salutation)="" or TRIM(con.salutation) IS NULL , 'zNo Salutation',
-            con.salutation) as salutation,
-            IF(TRIM(con.first_name)="" or TRIM(con.first_name) IS NULL , 'zNo First Name',
-            con.first_name) as first_name,
-            IF(TRIM(con.middle_name)="" or TRIM(con.middle_name) IS NULL , 'zNo Middle Name',
-            con.middle_name) as middle_name,
-            IF(TRIM(con.last_name)="" or TRIM(con.last_name) IS NULL , 'zNo Last Name',
-            con.last_name) as last_name,
-            IF(TRIM(con.gender)="" or TRIM(con.gender) IS NULL , 'zNo Gender',
-            con.gender) as gender, con.is_primary_contact,
-            con.birthday, con.anniversary, con.designation, con.department, con.notes,
-            dl.link_doctype, dl.link_name {fd_add}
-            FROM `tabContact` con, `tabDynamic Link` dl {tbl_join}
-            WHERE dl.parenttype = 'Contact' AND dl.parent = con.name {conditions}
-            ORDER BY dl.link_doctype, dl.link_name, con.name"""
+            query = f"""
+                SELECT 
+                    con.name,
+                    COALESCE(NULLIF(TRIM(con.salutation), ''), 'zNo Salutation') as salutation,
+                    COALESCE(NULLIF(TRIM(con.first_name), ''), 'zNo First Name') as first_name,
+                    COALESCE(NULLIF(TRIM(con.middle_name), ''), 'zNo Middle Name') as middle_name,
+                    COALESCE(NULLIF(TRIM(con.last_name), ''), 'zNo Last Name') as last_name,
+                    COALESCE(NULLIF(TRIM(con.gender), ''), 'zNo Gender') as gender, 
+                    con.is_primary_contact,
+                    con.birthday, con.anniversary, con.designation, con.department, con.notes,
+                    dl.link_doctype, dl.link_name {fd_add}
+                FROM `tabContact` con
+                INNER JOIN `tabDynamic Link` dl ON dl.parent = con.name
+                {tbl_join}
+                WHERE dl.parenttype = 'Contact' {conditions}
+                ORDER BY dl.link_doctype, dl.link_name, con.name
+            """
         else:
-            query = f"""SELECT con.name,
-            IF(TRIM(con.salutation)="" or TRIM(con.salutation) IS NULL , 'zNo Salutation',
-            con.salutation) as salutation,
-            IF(TRIM(con.first_name)="" or TRIM(con.first_name) IS NULL , 'zNo First Name',
-            con.first_name) as first_name,
-            IF(TRIM(con.middle_name)="" or TRIM(con.middle_name) IS NULL , 'zNo Middle Name',
-            con.middle_name) as middle_name,
-            IF(TRIM(con.last_name)="" or TRIM(con.last_name) IS NULL , 'zNo Last Name',
-            con.last_name) as last_name,
-            IF(TRIM(con.gender)="" or TRIM(con.gender) IS NULL , 'zNo Gender',
-            con.gender) as gender, con.is_primary_contact,
-            con.birthday, con.anniversary, con.designation, con.department, con.notes
-            FROM `tabContact` con
-            WHERE con.name NOT IN (SELECT parent FROM `tabDynamic Link` WHERE parenttype = 'Contact'
-            GROUP BY parent)
-            ORDER BY con.name"""
-    data = frappe.db.sql(query, as_dict=1)
-    if filters.get("type") == "Contact":
+            query = """
+                SELECT 
+                    con.name,
+                    COALESCE(NULLIF(TRIM(con.salutation), ''), 'zNo Salutation') as salutation,
+                    COALESCE(NULLIF(TRIM(con.first_name), ''), 'zNo First Name') as first_name,
+                    COALESCE(NULLIF(TRIM(con.middle_name), ''), 'zNo Middle Name') as middle_name,
+                    COALESCE(NULLIF(TRIM(con.last_name), ''), 'zNo Last Name') as last_name,
+                    COALESCE(NULLIF(TRIM(con.gender), ''), 'zNo Gender') as gender, 
+                    con.is_primary_contact,
+                    con.birthday, con.anniversary, con.designation, con.department, con.notes
+                FROM `tabContact` con
+                WHERE con.name NOT IN (SELECT parent FROM `tabDynamic Link` WHERE parenttype = 'Contact' GROUP BY parent)
+                ORDER BY con.name
+            """
+    
+    data = frappe.db.sql(query, params, as_dict=1)
+
+    if filters.get("type") == "Contact" and data:
+        contact_names = [r.name for r in data]
+        
+        # Optimized Bulk fetching for Phones
+        phones = frappe.get_all("Contact Phone", filters={"parent": ["in", contact_names]}, fields=["parent", "phone"])
+        phone_map = {}
+        for p in phones:
+            p_name = p.parent
+            if p_name not in phone_map: phone_map[p_name] = []
+            phone_map[p_name].append(p.phone)
+
+        # Optimized Bulk fetching for Emails
+        emails = frappe.get_all("Contact Email", filters={"parent": ["in", contact_names]}, fields=["parent", "email_id"])
+        email_map = {}
+        for e in emails:
+            e_name = e.parent
+            if e_name not in email_map: email_map[e_name] = []
+            email_map[e_name].append(e.email_id)
+
         for row in data:
-            phone_nos = get_contact_phones(row.name)
-            emails = get_contact_emails(row.name)
-            row["phone"] = phone_nos
-            row["email"] = emails
+            row["phone"] = ", ".join(phone_map.get(row.name, []))
+            row["email"] = ", ".join(email_map.get(row.name, []))
+    
     return data
 
 
@@ -191,11 +192,14 @@ def get_conditions(filters):
     cond = ""
     tbl_join = ""
     fd_add = ""
+    params = {}
     if filters.get("link_type"):
-        cond += f" AND dl.link_doctype = '{filters.get('link_type')}'"
+        cond += " AND dl.link_doctype = %(link_type)s"
+        params["link_type"] = filters.get("link_type")
 
     if filters.get("linked_to"):
-        cond += f" AND dl.link_name = '{filters.get('linked_to')}'"
+        cond += " AND dl.link_name = %(linked_to)s"
+        params["linked_to"] = filters.get("linked_to")
 
     if filters.get("territory"):
         fd_add += ", cu.territory"
@@ -204,37 +208,27 @@ def get_conditions(filters):
                 AND dl.link_name = cu.name"""
         terr = frappe.get_doc("Territory", filters["territory"])
         if terr.is_group == 1:
-            child_territories = frappe.db.sql(f"""SELECT name FROM `tabTerritory`
-                WHERE lft >= {terr.lft} AND rgt <= {terr.rgt}""", as_list=1)
-            for i in child_territories:
-                if child_territories[0] == i:
-                    cond += " AND (cu.territory = '%s'" % i[0]
-                elif child_territories[len(child_territories) - 1] == i:
-                    cond += " OR cu.territory = '%s')" % i[0]
-                else:
-                    cond += " OR cu.territory = '%s'" % i[0]
+            child_territories = frappe.get_all("Territory", filters={"lft": [">=", terr.lft], "rgt": ["<=", terr.rgt]}, pluck="name")
+            cond += " AND cu.territory IN %(territories)s"
+            params["territories"] = child_territories
         else:
-            cond += " AND cu.territory = '%s'" % filters["territory"]
+            cond += " AND cu.territory = %(territory)s"
+            params["territory"] = filters["territory"]
 
     if filters.get("customer_group"):
         fd_add += ", cu.customer_group"
-        if tbl_join == "":
+        if "tabCustomer" not in tbl_join:
             tbl_join += """ LEFT JOIN `tabCustomer` cu ON dl.link_doctype = 'Customer'
                 AND dl.link_name = cu.name"""
         cg = frappe.get_doc("Customer Group", filters["customer_group"])
         if cg.is_group == 1:
-            child_cgs = frappe.db.sql(f"""SELECT name FROM `tabCustomer Group`
-                WHERE lft >= {cg.lft} AND rgt <= {cg.rgt}""", as_list=1)
-            for i in child_cgs:
-                if child_cgs[0] == i:
-                    cond += " AND (cu.customer_group = '%s'" % i[0]
-                elif child_cgs[len(child_cgs) - 1] == i:
-                    cond += " OR cu.customer_group = '%s')" % i[0]
-                else:
-                    cond += " OR cu.customer_group = '%s'" % i[0]
+            child_cgs = frappe.get_all("Customer Group", filters={"lft": [">=", cg.lft], "rgt": ["<=", cg.rgt]}, pluck="name")
+            cond += " AND cu.customer_group IN %(customer_groups)s"
+            params["customer_groups"] = child_cgs
         else:
-            cond += " AND cu.customer_group = '%s'" % filters["customer_group"]
-    return cond, tbl_join, fd_add
+            cond += " AND cu.customer_group = %(customer_group)s"
+            params["customer_group"] = filters["customer_group"]
+    return cond, tbl_join, fd_add, params
 
 @frappe.whitelist()
 @frappe.validate_and_sanitize_search_inputs

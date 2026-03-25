@@ -10,64 +10,119 @@ from ....utils.asset_utils import get_ast_cat_finance, get_total_assets_for_item
 def execute(filters=None):
     if not filters:
         filters = {}
-    conditions, cond_dep = get_conditions(filters)
+    
+    conditions, cond_dep, params = get_conditions(filters)
     columns = get_columns(filters)
+    
     if filters.get("compare_accounts") == 1:
         data = compare_asset_with_accounts(filters)
     else:
-        assets = get_assets(conditions, filters)
-        acc_dep = get_acc_dep(assets, cond_dep)
+        assets = get_assets(conditions, filters, params)
+        acc_dep_list = get_acc_dep(assets, cond_dep, params)
+        
+        # O(1) Lookup Optimization
+        acc_dep_map = {d.parent: d for d in acc_dep_list}
+        
         data = []
         for a in assets:
-            open_acc_dep = a.opening_accumulated_depreciation
-            purchase = a.net_purchase_amount
-            row = [a.name, a.item_code, a.purchase_date, purchase, a.total_number_of_depreciations,
-            open_acc_dep]
-            check = 0
-            for acc in acc_dep:
-                if acc.parent == a.name:
-                    total_dep = flt(round(acc.dep,2))
-                    period_dep = flt(round(acc.monthly, 2))
-                    row += [(total_dep - period_dep), total_dep, period_dep]
-                    check = 1
-            if check == 0:  # if fully depreciated asset
-                total_dep = purchase - a.salvage
+            purchase = flt(a.net_purchase_amount)
+            row = [
+                a.name, a.item_code, a.purchase_date, purchase, 
+                a.total_number_of_depreciations, a.opening_accumulated_depreciation
+            ]
+            
+            acc = acc_dep_map.get(a.name)
+            if acc:
+                total_dep = flt(round(acc.dep, 2))
+                period_dep = flt(round(acc.monthly, 2))
+                row += [(total_dep - period_dep), total_dep, period_dep]
+            else:
+                # Fully depreciated fallback
+                total_dep = purchase - flt(a.salvage)
                 period_dep = 0
                 row += [(total_dep - period_dep), total_dep, period_dep]
-            row += [(purchase - total_dep), a.salvage, a.status, a.disposal_date,
-            a.fixed_asset_account, a.asset_category,
-            a.warehouse, a.model, a.manufacturer, a.description, a.purchase_receipt,
-            a.purchase_invoice]
-
+            
+            row += [
+                (purchase - total_dep), a.salvage, a.status, a.disposal_date,
+                a.fixed_asset_account, a.asset_category,
+                a.warehouse, a.model, a.manufacturer, a.description, a.purchase_receipt,
+                a.purchase_invoice
+            ]
             data.append(row)
+            
     return columns, data
 
 def compare_asset_with_accounts(filters):
-    """
-    Returns the list of GRN or PI where Fixed Assets are not created
-    """
+    to_date = filters.get("to_date") or frappe.utils.today()
+    
+    # Respect filters in reconciliation mode
+    item_conditions = ""
+    item_params = {"to_date": to_date}
+
+    if filters.get("asset_category"):
+        item_conditions += " AND it.asset_category = %(asset_category)s"
+        item_params["asset_category"] = filters.get("asset_category")
+    
+    # 1. Bulk fetch Fixed Asset items with reconciliation filters
+    item_list = frappe.db.sql(f"""
+        SELECT 
+            it.name, it.description, it.asset_category,
+            IFNULL(it.end_of_life, '2099-12-31') as eol, 
+            ascat.type_of_asset
+        FROM `tabItem` it
+        INNER JOIN `tabAsset Category` ascat ON it.asset_category = ascat.name
+        WHERE it.is_fixed_asset = 1 {item_conditions}
+        ORDER BY it.name
+    """, item_params, as_dict=1)
+    
+    if not item_list:
+        return []
+
+    # 2. Bulk fetch Asset Category Accounts (O(1) mapping)
+    # Respect fixed_asset_account filter if provided
+    acc_filters = {}
+    if filters.get("account"):
+        acc_filters["fixed_asset_account"] = filters.get("account")
+        
+    category_accounts = frappe.get_all("Asset Category Account", 
+        filters=acc_filters,
+        fields=["parent", "fixed_asset_account"])
+    cat_acc_map = {d.parent: d.fixed_asset_account for d in category_accounts}
+
+    # 3. Bulk calculate Asset Totals per Item Code (O(N) aggregation)
+    asset_totals = frappe.db.sql("""
+        SELECT 
+            item_code, 
+            COUNT(name) as no_of_assets,
+            SUM(net_purchase_amount) as total_value
+        FROM `tabAsset`
+        WHERE docstatus = 1 AND purchase_date <= %s
+        AND (disposal_date IS NULL OR disposal_date > %s)
+        GROUP BY item_code
+    """, (to_date, to_date), as_dict=1)
+    asset_map = {d.item_code: d for d in asset_totals}
+
+    # 4. Assembly with Bulk Balance fetching
     data = []
-    item_list = frappe.db.sql("""SELECT it.name, it.description, it.asset_category,
-        IFNULL(it.end_of_life, '2099-12-31') as eol, ascat.type_of_asset,
-        ascat.residual_value_percent
-        FROM `tabItem` it, `tabAsset Category` ascat
-        WHERE it.is_fixed_asset = 1 AND it.asset_category = ascat.name
-        ORDER BY it.name""", as_dict=1)
+    account_balances = {}
+    
     for itm in item_list:
-        ast_fin = get_ast_cat_finance(itm.asset_category)[0]
-        tot_ast_dict = get_total_assets_for_item_code(item_code=itm.name,
-            on_date=filters.get("to_date"))
-        itm["asset_account"] = ast_fin.fixed_asset_account
-        itm["asset_acc_balance"] = get_balance_on(account=ast_fin.fixed_asset_account,
-            date=filters.get("to_date"))
-        itm["working_assets"] = tot_ast_dict.no_of_assets
-        itm["tot_asset_value"] = tot_ast_dict.total_value
-        row = [
-            itm.name, itm.asset_category, itm.eol, itm.asset_account, itm.type_of_asset,
-            itm.asset_acc_balance, itm.tot_asset_value, itm.working_assets,
-            (itm.asset_acc_balance - itm.tot_asset_value)
-               ]
-        data.append(row)
+        acc = cat_acc_map.get(itm.asset_category)
+        if not acc: continue
+        
+        if acc not in account_balances:
+            account_balances[acc] = get_balance_on(account=acc, date=to_date)
+            
+        stats = asset_map.get(itm.name, frappe._dict({"no_of_assets": 0, "total_value": 0}))
+        
+        acc_bal = flt(account_balances[acc])
+        asset_val = flt(stats.total_value)
+        
+        data.append([
+            itm.name, itm.asset_category, itm.eol, acc, itm.type_of_asset,
+            acc_bal, asset_val, stats.no_of_assets, (acc_bal - asset_val)
+        ])
+        
     return data
 
 
@@ -92,62 +147,98 @@ def get_columns(filters):
                 "PI:Link/Purchase Invoice:80"
         ]
 
-def get_assets(conditions, filters):
-    query = """SELECT ass.name, ass.item_code, ass.asset_category,
-        IFNULL(ass.warehouse, "NIL") as warehouse, IFNULL(ass.model, "NIL") as model,
-        IFNULL(ass.manufacturer, "NIL") as manufacturer, IFNULL(ass.status, "NO STATUS") as status,
-        IFNULL(ass.description, "NIL") as description, ass.purchase_date,
-        ass.net_purchase_amount, ass.opening_accumulated_depreciation,
-        IFNULL(ass_fb.expected_value_after_useful_life, 0) AS salvage,
-        IFNULL(ass.disposal_date, '2199-12-31') as disposal_date,
-        ass_fb.total_number_of_depreciations, as_cat_acc.fixed_asset_account, ass.purchase_receipt,
-        ass.purchase_invoice
-        FROM `tabAsset` ass, `tabAsset Category` as_cat, `tabAsset Category Account` as_cat_acc,
-            `tabAsset Finance Book` ass_fb
-        WHERE ass.docstatus != 2 AND ass.asset_category = as_cat.name
-            AND ass_fb.parent = ass.name AND ass_fb.parenttype = 'Asset'
-            AND IFNULL(ass.disposal_date, '2099-12-31') >= '%s'
-            AND as_cat_acc.parent = as_cat.name  %s
-        ORDER BY ass.purchase_date DESC, ass.asset_category""" %(filters.get("to_date"),conditions)
-    #frappe.msgprint(query)
-    assets = frappe.db.sql(query, as_dict = 1)
-    if assets:
-        pass
-    else:
+def get_assets(conditions, filters, params):
+    # Ensure to_date has a value for disposal check
+    params["to_date"] = params.get("to_date") or frappe.utils.today()
+    
+    query = f"""
+        SELECT 
+            ass.name, ass.item_code, ass.asset_category,
+            IFNULL(ass.warehouse, 'NIL') as warehouse, 
+            IFNULL(ass.model, 'NIL') as model,
+            IFNULL(ass.manufacturer, 'NIL') as manufacturer, 
+            IFNULL(ass.status, 'NO STATUS') as status,
+            IFNULL(ass.description, 'NIL') as description, 
+            ass.purchase_date,
+            ass.net_purchase_amount, 
+            ass.opening_accumulated_depreciation,
+            IFNULL(ass_fb.expected_value_after_useful_life, 0) AS salvage,
+            IFNULL(ass.disposal_date, '2199-12-31') as disposal_date,
+            ass_fb.total_number_of_depreciations, 
+            as_cat_acc.fixed_asset_account, 
+            ass.purchase_receipt,
+            ass.purchase_invoice
+        FROM `tabAsset` ass
+        INNER JOIN `tabAsset Category` as_cat ON ass.asset_category = as_cat.name
+        INNER JOIN `tabAsset Finance Book` ass_fb ON ass_fb.parent = ass.name
+        INNER JOIN `tabAsset Category Account` as_cat_acc ON as_cat_acc.parent = as_cat.name
+        WHERE ass.docstatus != 2 
+        AND ass_fb.parenttype = 'Asset'
+        AND IFNULL(ass.disposal_date, '2099-12-31') >= %(to_date)s
+        {conditions}
+        ORDER BY ass.purchase_date DESC, ass.asset_category
+    """
+    assets = frappe.db.sql(query, params, as_dict=1)
+    
+    if not assets:
         frappe.throw("No Assets in the Selected Criterion")
-    #frappe.msgprint(str(assets))
     return assets
 
-def get_acc_dep(asset, cond_dep):
-    acc_dep = frappe.db.sql("""SELECT MAX(ds.accumulated_depreciation_amount) as dep,
-        ds.parent, SUM(ds.depreciation_amount) as monthly
+def get_acc_dep(assets, cond_dep, params):
+    if not assets:
+        return []
+    
+    # Bulk Fetch targeted by asset names
+    asset_names = [d.name for d in assets]
+    dep_params = params.copy()
+    
+    # Secure and highly compatible dictionary expansion for IN clause
+    placeholders = []
+    for i, name in enumerate(asset_names):
+        key = f"asset_name_{i}"
+        dep_params[key] = name
+        placeholders.append(f"%({key})s")
+    
+    query = f"""
+        SELECT 
+            MAX(ds.accumulated_depreciation_amount) as dep,
+            ds.parent, 
+            SUM(ds.depreciation_amount) as monthly
         FROM `tabDepreciation Schedule` ds
-        WHERE ds.docstatus != 2 {condition} AND ds.parent IN (%s)
-        GROUP BY ds.parent""".format(condition = cond_dep) %
-            (', '.join(['%s']*len(asset))), tuple([d.name for d in asset]), as_dict=1)
-    return acc_dep
+        WHERE ds.docstatus != 2 
+        {cond_dep}
+        AND ds.parent IN ({', '.join(placeholders)})
+        GROUP BY ds.parent
+    """
+    
+    return frappe.db.sql(query, dep_params, as_dict=1)
 
 def get_conditions(filters):
     conditions = ""
     cond_dep = ""
+    to_date = filters.get("to_date") or frappe.utils.today()
+    params = {"to_date": to_date}
 
     if filters.get("from_date"):
-        if filters["from_date"] > filters["to_date"]:
+        if filters["from_date"] > to_date:
             frappe.throw("From Date cannot be greater than To Date")
-        cond_dep += "AND ds.schedule_date >= '%s'"% filters["from_date"]
+        cond_dep += " AND ds.schedule_date >= %(from_date)s"
+        params["from_date"] = filters.get("from_date")
 
     if filters.get("to_date"):
-        conditions += "AND ass.purchase_date <= '%s'" % filters["to_date"]
-        cond_dep += "AND ds.schedule_date <= '%s'"% filters["to_date"]
+        conditions += " AND ass.purchase_date <= %(to_date)s"
+        cond_dep += " AND ds.schedule_date <= %(to_date)s"
 
     if filters.get("asset_category"):
-        conditions += "AND ass.asset_category = '%s'" % filters["asset_category"]
+        conditions += " AND ass.asset_category = %(asset_category)s"
+        params["asset_category"] = filters.get("asset_category")
 
     if filters.get("asset"):
-        conditions += "AND ass.name = '%s'" % filters["asset"]
+        conditions += " AND ass.name = %(asset)s"
+        params["asset"] = filters.get("asset")
 
     if filters.get("account"):
-        conditions += "AND as_cat_acc.fixed_asset_account = '%s'" % filters["account"]
+        conditions += " AND as_cat_acc.fixed_asset_account = %(account)s"
+        params["account"] = filters.get("account")
 
-
-    return conditions, cond_dep
+    return conditions, cond_dep, params

@@ -226,19 +226,67 @@ def get_input_for_change(col_name, exist_len, max_len, sug_len, limit):
 
 def get_size_of_all_tables():
     config = frappe.get_site_config()
-    query = """SELECT table_schema AS db_name, table_name AS tbl_name,
-    ROUND(((data_length + index_length) / 1024 / 1024), 2) AS size_mb, ROUND(((data_length) / 1024 / 1024), 2) AS dl_mb,
-    ROUND(((index_length) / 1024 / 1024), 2) AS ind_mb, TABLE_ROWS as tbl_rows
-    FROM information_schema.TABLES
-    WHERE TABLE_SCHEMA = '%s'
-    ORDER BY (data_length + index_length) DESC""" % config.db_name
-    data = frappe.db.sql(query, as_dict=1)
-    return data
+    query = """
+        SELECT 
+            t.table_schema AS db_name, 
+            t.table_name AS tbl_name,
+            ROUND(((t.data_length + t.index_length) / 1024 / 1024), 2) AS size_mb, 
+            ROUND((t.data_length / 1024 / 1024), 2) AS dl_mb,
+            ROUND((t.index_length / 1024 / 1024), 2) AS ind_mb, 
+            t.TABLE_ROWS as tbl_rows,
+            COALESCE(c.col_count, 0) as no_of_cols
+        FROM information_schema.TABLES t
+        LEFT JOIN (
+            SELECT table_schema, table_name, COUNT(*) as col_count
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE table_schema = '%s'
+            GROUP BY table_schema, table_name
+        ) c ON c.table_schema = t.table_schema AND c.table_name = t.table_name
+        WHERE t.TABLE_SCHEMA = '%s'
+        ORDER BY (t.data_length + t.index_length) DESC
+    """ % (config.db_name, config.db_name)
+    return frappe.db.sql(query, as_dict=1)
 
 
 def get_columns_of_all_tables():
     config = frappe.get_site_config()
-    query = """SELECT table_schema AS db_name, table_name AS tbl_name, COUNT(*) AS no_of_cols
-    FROM INFORMATION_SCHEMA.COLUMNS WHERE table_schema = '%s' GROUP BY tbl_name ORDER BY no_of_cols DESC;""" % config.db_name
-    data = frappe.db.sql(query, as_dict=1)
-    return data
+    query = """
+        SELECT table_schema AS db_name, table_name AS tbl_name, COUNT(*) AS no_of_cols
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE table_schema = '%s' 
+        GROUP BY tbl_name 
+        ORDER BY no_of_cols DESC;
+    """ % config.db_name
+    return frappe.db.sql(query, as_dict=1)
+
+
+def get_orphaned_tables():
+    """
+    Identifies tables in DB that don't have a corresponding DocType.
+    """
+    all_tabs = get_size_of_all_tables()
+    
+    # Fetch all doctypes to check against
+    all_dts = frappe.get_all("DocType", fields=["name", "module", "issingle", "istable", "creation", "modified"])
+    dt_names = {f"tab{d.name}" for d in all_dts if not d.issingle}
+    dt_map = {f"tab{d.name}": d for d in all_dts}
+
+    # Core tables to ignore
+    core_tables = {
+        "__global_search", "__record_log", "tabDefaultValue", "tabDocField", 
+        "tabDocPerm", "tabDocType", "tabDocType Action", "tabDocType State",
+        "tabModule Def", "tabUser", "tabSessions", "tabAuth Log", "tabSingles"
+    }
+
+    orphaned = []
+    for t in all_tabs:
+        if t.tbl_name.startswith("tab") and t.tbl_name not in dt_names and t.tbl_name not in core_tables:
+            t.update({
+                "app": "N/A",
+                "module": "N/A",
+                "dt_name": t.tbl_name[3:],
+                "last_entry": "Check Manually"
+            })
+            orphaned.append(t)
+            
+    return orphaned
