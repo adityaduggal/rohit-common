@@ -25,6 +25,8 @@ fixtures = [
                 "in",
                 [
                     "File",
+                    "Print Format",
+                    "Sales Invoice",
                     "e-Invoice Log",
                     "GSTR2A RIGPL",
                     "GSTR-1",
