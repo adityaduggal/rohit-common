@@ -4,6 +4,11 @@
 import frappe
 from datetime import datetime
 from frappe.utils import flt, get_last_day, getdate
+import base64
+import requests
+from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+from cryptography.hazmat.primitives import hashes
 
 
 def get_place_of_supply(dtype, dname):
@@ -154,13 +159,32 @@ def get_gsp_details(api, action, gstin=None, api_type=None):
     sandbox = rset.sandbox_mode
     gsp_link = rset.api_link
     asp_id = rset.tax_pro_asp_id
-    asp_pass = rset.tax_pro_password
+    asp_pass = rset.tax_pro_asp_secret
+    dsc_pfx_path = get_file_full_path(getattr(rset, 'dsc_pfx_path', None))
+    dsc_password = getattr(rset, 'dsc_password', None)
+    if not dsc_pfx_path or not dsc_password:
+        frappe.throw("DSC PFX path or password not set in Rohit Settings")
+    txn_id = str(datetime.now().timestamp()).replace('.', '')
+    ip_usr = "127.0.0.1"  # or fetch from settings if needed
+    result = call_getkey_api(
+        aspid=asp_id,
+        asp_password=asp_pass,
+        txn=txn_id,
+        pfx_file=dsc_pfx_path,
+        dsc_password=dsc_password,
+        ip_usr=ip_usr,
+        sandbox=sandbox
+    )
+    session_id = result.get("asp_session_id")
+    asp_ek = result.get("enc_key")
+    # frappe.throw(f"Debug Info: {result}")
+    if not session_id:
+        frappe.throw(f"Session ID could not be generated: {result.get('error', 'Unknown error')}")
 
     if api == 'eway':
         gsp_link = gsp_link[:8] + "einvapi." + gsp_link[8:]
     else:
         gsp_link = gsp_link[:8] + "gstapi." + gsp_link[8:]
-
 
     if not gstin:
         if api_type == 'common':
@@ -180,9 +204,17 @@ def get_gsp_details(api, action, gstin=None, api_type=None):
             gsp_link = gsp_sandbox_link
     if api_type == 'common':
         gsp_link = gsp_link + api_url + 'aspid=' + asp_id + '&password=' + asp_pass + '&Action=' + action
+    print(gsp_link, asp_id, asp_pass, gstin, sandbox, session_id, asp_ek)
+    # frappe.throw(f"Debug Info: {gsp_link}, {asp_id}, {asp_pass}, {gstin}, {sandbox}, {session_id}, {asp_ek}")
+    # gsp_link, asp_id, asp_pass, caller_gstin, sandbox, session_id, asp_ek
+    return gsp_link, asp_id, asp_pass, gstin, sandbox, session_id, asp_ek
 
-    return gsp_link, asp_id, asp_pass, gstin, sandbox
 
+def get_file_full_path(file):
+    if "private" not in file:
+        return frappe.get_site_path() + "/public" + file  # noqa: 501
+    else:
+        return frappe.get_site_path() + file
 
 def gst_return_period_validation(return_period):
     month = flt(return_period[:2])
@@ -215,3 +247,60 @@ def get_dates_from_return_period(monthly_ret_pd):
 def validate_gstin(gstin):
     if len(gstin) != 15:
         frappe.throw(f"GST Number: {gstin} Should be of 15 Characters")
+
+def call_getkey_api(aspid, asp_password, txn, pfx_file, dsc_password, ip_usr, sandbox):
+    """
+    Calls the GST GSP GetKey API to generate session_id using DSC.
+    Returns a dict with asp_session_id and enc_key (and error if any).
+    """
+    # Load DSC and sign content
+    try:
+        with open(pfx_file, 'rb') as f:
+            pfx_data = f.read()
+        private_key, certificate, _ = pkcs12.load_key_and_certificates(
+            pfx_data,
+            password=dsc_password.encode() if dsc_password else None
+        )
+        if certificate is None or private_key is None:
+            return {"error": "Certificate not found"}
+        subject = certificate.subject.rfc4514_string()
+        if not any(attr.startswith("OU=GST") for attr in subject.split(',')):
+            return {"error": "Certificate not found"}
+        timestamp = datetime.now().strftime("%d%m%Y%H%M%S%f")[:20]
+        content_to_sign = aspid + timestamp
+        signature = private_key.sign(
+            content_to_sign.encode("utf-8"),
+            asym_padding.PKCS1v15(),
+            hashes.SHA256()
+        )
+        signed_content = base64.b64encode(signature).decode('utf-8')
+    except Exception as e:
+        return {"error": str(e)}
+
+    url = "https://gstsandbox.charteredinfo.com/aspapi/v1.0/getKey" if sandbox else "https://gstapi.charteredinfo.com/aspapi/v1.0/getKey"
+    headers = {
+        "aspid": aspid,
+        "txn": txn,
+        "Content-Type": "application/json; charset=utf-8",
+        "ip-usr": ip_usr
+    }
+    payload = {
+        "timestamp": timestamp,
+        "signed_content": signed_content
+    }
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return {"error": f"HTTP {response.status_code}", "details": response.text}
+        data = response.json()
+        if data.get("status_cd") != "1":
+            return {"error": "API call failed", "message": data.get("message")}
+        return {
+            "asp_session_id": data.get("session_id"),
+            "enc_key": data.get("enc_key"),
+            "validity_min": data.get("validity_min"),
+            "txn": data.get("txn"),
+            "raw_response": data
+        }
+    except Exception as e:
+        return {"error": str(e)}

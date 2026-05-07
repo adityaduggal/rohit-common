@@ -25,7 +25,9 @@ frappe.ui.form.on("Address", {
         "excise_no", "latitude", "longitude", "global_google_code", "known_states"];
 
         for (let fld of reset_flds) {
-            frm.doc[fld] = "" ;
+            let df = frappe.meta.get_docfield("Address", fld, frm.doc.name);
+            let value = (df && df.fieldtype === "Check") ? 0 : "";
+            frm.set_value(fld, value);
         }
         frm.refresh_fields();
 

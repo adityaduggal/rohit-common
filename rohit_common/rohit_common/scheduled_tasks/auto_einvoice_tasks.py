@@ -6,7 +6,8 @@ import frappe
 from frappe.utils import flt
 from frappe.utils.background_jobs import enqueue
 from erpnext.stock.stock_ledger import NegativeStockError
-from ..india_gst_api.einv import einv_needed, generate_irn
+
+from ..india_gst_api.einv import generate_irn_from_doc
 
 
 def enq_inv_sub():
@@ -25,67 +26,160 @@ def enq_einv_create():
 
 def get_unposted_invoices():
     """
-    Gets a list of invoices which are not posted in the General Ledger and also the ones
-    not posted in Stock Ledger
+    Finds submitted invoices without GL entries and resets them to Draft.
     """
-    gl_not_posted = frappe.db.sql("""SELECT si.name, si.creation FROM `tabSales Invoice` si
-        WHERE si.base_grand_total > 0 AND si.docstatus = 1 AND si.name NOT IN (SELECT gle.voucher_no
-        FROM `tabGL Entry` gle WHERE gle.voucher_type = 'Sales Invoice'
-        AND gle.voucher_no = si.name) ORDER BY si.creation""", as_dict=1)
-    for un_si in gl_not_posted:
-        sid = frappe.get_doc("Sales Invoice", un_si)
-        sid.cancel()
-        frappe.db.set_value("Sales Invoice", un_si.name, "docstatus", 0)
-        frappe.db.set_value("Sales Invoice", un_si.name, "set_posting_time", 1)
-        frappe.db.set_value("Sales Invoice", un_si.name, "marked_to_submit", 1)
-        print(f"SI# {un_si.name} not Posted in General Ledger hence Made Draft")
+    log = frappe.logger("gl_repair")
+    
+    BATCH_SIZE = 20
+
+    invoices = frappe.db.sql(
+        """
+        SELECT si.name
+        FROM `tabSales Invoice` si
+        LEFT JOIN `tabGL Entry` gle
+            ON gle.voucher_no = si.name
+            AND gle.voucher_type = 'Sales Invoice'
+        WHERE si.base_grand_total > 0
+        AND si.docstatus = 1
+        AND gle.name IS NULL
+        ORDER BY si.creation
+        """,
+        as_dict=True
+    )
+
+    processed = 0
+
+    for row in invoices:
+
+        try:
+            doc = frappe.get_doc("Sales Invoice", row.name)
+
+            doc.cancel()
+
+            frappe.db.set_value(
+                "Sales Invoice",
+                row.name,
+                {
+                    "docstatus": 0,
+                    "set_posting_time": 1,
+                    "marked_to_submit": 1
+                }
+            )
+
+            log.info(
+                f"Sales Invoice {row.name} not posted in GL. Converted back to Draft."
+            )
+
+            processed += 1
+
+        except Exception:
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"GL repair failed for Sales Invoice {row.name}"
+            )
+
+        if processed and processed % BATCH_SIZE == 0:
+            frappe.db.commit()
+
+    frappe.db.commit()
 
 
 def get_docs_to_submit():
     """
-    Submits the Sales Invoices or JV which are marked to Submit
+    Submits documents which were marked to submit
     """
+
     doc_list = ["Sales Invoice"]
-    for doc in doc_list:
-        dft_doc = frappe.db.sql(f"""SELECT name FROM `tab{doc}` WHERE docstatus = 0
-            AND marked_to_submit = 1""", as_dict=1)
-        if dft_doc:
-            for dtd in dft_doc:
-                doc_t = frappe.get_doc(doc, dtd.name)
-                try:
-                    doc_t.submit()
-                    print(f"Submitting {doc_t.name}")
-                except NegativeStockError:
-                    print(f"Negative Stock Error for {doc_t.name} hence Rolling Back")
-                    frappe.db.rollback()
-                except Exception as e:
-                    print(f"Some Other Error for {doc_t.name} and Error = {e}")
-                    frappe.db.rollback()
+
+    for doctype in doc_list:
+
+        draft_docs = frappe.db.sql(
+            f"""
+            SELECT name
+            FROM `tab{doctype}`
+            WHERE docstatus = 0
+            AND marked_to_submit = 1
+            """,
+            as_dict=True
+        )
+
+        for row in draft_docs:
+
+            doc = frappe.get_doc(doctype, row.name)
+
+            try:
+                doc.submit()
+                frappe.logger().info(f"Submitted {doctype} {doc.name}")
+                
+                # CRITICAL FIX: Commit only on success
                 frappe.db.commit()
+
+            except NegativeStockError:
+                frappe.db.rollback()
+                frappe.logger().warning(
+                    f"Negative stock error while submitting {doc.name}"
+                )
+
+            except Exception:
+                frappe.db.rollback()
+                frappe.log_error(
+                    frappe.get_traceback(),
+                    f"Submission failed for {doc.name}"
+                )
 
 
 def make_einvoice_for_docs():
     """
-    Makes the einvoice for the Docs based on eInvoice Applicability and its Date
+    Generates eInvoices for eligible documents
     """
-    doc_list = ["Sales Invoice"]
-    einv_app = flt(frappe.get_value("Rohit Settings", "Rohit Settings", "enable_einvoice"))
-    einv_date = frappe.get_value("Rohit Settings", "Rohit Settings", "einvoice_applicable_date")
-    if einv_app == 1:
-        for doc in doc_list:
-            query = f"""SELECT name, posting_date FROM `tab{doc}` WHERE docstatus = 1 AND
-            (irn IS NULL OR ack_no IS NULL OR ack_date IS NULL) AND
-            posting_date >= '{einv_date}' ORDER BY posting_date DESC, name DESC"""
-            einv_docs = frappe.db.sql(query, as_dict=1)
-            if einv_docs:
-                for einv in einv_docs:
-                    need_einv = einv_needed(doc, einv.name)
-                    if need_einv == 1:
-                        try:
-                            print(f"Trying to Generate eInvoice for {doc}: {einv.name}")
-                            generate_irn(dtype=doc, dname=einv.name)
-                        except Exception as e:
-                            print(e)
+
+    enable_einv = flt(
+        frappe.db.get_single_value("Rohit Settings", "enable_einvoice")
+    )
+
+    if not enable_einv:
+        return
+
+    einv_date = frappe.db.get_single_value(
+        "Rohit Settings",
+        "einvoice_applicable_date"
+    )
+
+    invoices = frappe.db.sql(
+        """
+        SELECT name
+        FROM `tabSales Invoice`
+        WHERE docstatus = 1
+        AND (irn IS NULL OR ack_no IS NULL OR ack_date IS NULL)
+        AND posting_date >= %s
+        ORDER BY posting_date DESC, name DESC
+        """,
+        einv_date,
+        as_dict=True
+    )
+
+    for row in invoices:
+
+        try:
+            doc = frappe.get_doc("Sales Invoice", row.name)
+            
+            if doc.gst_category in ("Unregistered", "Consumer"):
+                continue
+
+            frappe.logger().info(
+                f"Generating eInvoice for Sales Invoice {doc.name}"
+            )
+
+            generate_irn_from_doc(doc)
+            
+            frappe.db.commit()
+
+        except Exception:
+            frappe.db.rollback()
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"eInvoice generation failed for {row.name}"
+            )
 
 
 def make_eway_bill_for_docs():

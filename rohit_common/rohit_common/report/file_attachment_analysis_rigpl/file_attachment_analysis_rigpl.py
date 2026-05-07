@@ -23,7 +23,7 @@ def get_columns(filters):
         if filters.get("is_folder") == 1:
             return [
                 "ID:Link/File:450", "File Name::200", "Parent Folder:Link/File:350", "Size(MB):Float:100",
-                "Left:Int:80", "Right:Int:80", "Files:Int:80","Is Home:Int:40", "Is Attachment::40"
+                "Left:Int:80", "Right:Int:80", "Files:Int:80", "Is Home:Int:40", "Is Attachment::40",
                 "Owner::80"
             ]
         else:
@@ -49,42 +49,73 @@ def get_columns(filters):
 def get_data(filters):
     data = []
     conditions, cond_summary = get_conditions(filters)
+    
     if filters.get("summary_dt") == 1:
-        data = frappe.db.sql("""SELECT IFNULL(attached_to_doctype, "NO DOCTYPE"), COUNT(name) as no_of_files,
-        ROUND(((SUM(file_size))/1024/1024),2) as size FROM `tabFile` WHERE docstatus=0 AND is_folder=0 %s
-        GROUP BY attached_to_doctype ORDER BY size DESC, no_of_files DESC """ % cond_summary, as_list=1)
+        data = frappe.db.sql("""
+            SELECT IFNULL(attached_to_doctype, "NO DOCTYPE"), COUNT(name) as no_of_files,
+            ROUND(((SUM(file_size))/1024/1024),2) as size 
+            FROM `tabFile` WHERE docstatus=0 AND is_folder=0 %s
+            GROUP BY attached_to_doctype ORDER BY size DESC, no_of_files DESC 
+        """ % cond_summary, as_list=1)
+        
     elif filters.get("summary_fol") == 1:
-        new_data = frappe.db.sql("""SELECT name, folder, ROUND(file_size/1024/1024, 2) as size, lft, rgt,
-            owner
-            FROM `tabFile`
-            WHERE docstatus=0 AND is_folder=1
-            ORDER BY lft DESC, rgt DESC""", as_dict=1)
+        # Optimized joined query to get folder details and child file aggregate stats in one go
+        new_data = frappe.db.sql("""
+            SELECT 
+                f.name, f.folder, 
+                ROUND(f.file_size/1024/1024, 2) as size, 
+                f.lft, f.rgt, f.owner,
+                COALESCE(child_stats.nos, 0) as count,
+                COALESCE(child_stats.size, 0) as act_size
+            FROM `tabFile` f
+            LEFT JOIN (
+                SELECT folder, COUNT(name) as nos, ROUND(SUM(file_size)/1024/1024, 2) as size
+                FROM `tabFile`
+                WHERE is_folder = 0 AND docstatus = 0
+                GROUP BY folder
+            ) child_stats ON child_stats.folder = f.name
+            WHERE f.docstatus=0 AND f.is_folder=1
+            ORDER BY f.lft DESC, f.rgt DESC
+        """, as_dict=1)
+        
         for row in new_data:
-            files = frappe.db.sql("""SELECT ROUND(((SUM(file_size))/1024/1024),2) as size, COUNT(name) as nos
-            FROM `tabFile` WHERE folder='%s'""" %row.name, as_dict=1)
-            row["act_size"] = files[0].size
-            row["count"] = files[0].nos
-        for row in new_data:
-            data_row = [row.name, row.folder, row.count, row.act_size, row.size, row.lft, row.rgt,
-            row.owner]
+            data_row = [row.name, row.folder, row.count, row.act_size, row.size, row.lft, row.rgt, row.owner]
             data.append(data_row)
+            
     else:
         if filters.get("is_folder") == 1:
-            data = frappe.db.sql("""SELECT name, file_name, folder, ROUND(file_size/1024/1024,2), lft, rgt, (rgt - lft),
-                is_home_folder, is_attachments_folder
-                FROM `tabFile` WHERE docstatus = 0 %s ORDER BY lft, rgt""" % (conditions), as_list=1)
+            data = frappe.db.sql("""
+                SELECT name, file_name, folder, ROUND(file_size/1024/1024,2), lft, rgt, (rgt - lft),
+                is_home_folder, is_attachments_folder, owner
+                FROM `tabFile` WHERE docstatus = 0 %s ORDER BY lft, rgt
+            """ % conditions, as_list=1)
         else:
-            query = """SELECT name, IFNULL(file_name, "NO NAME") as file_name, IFNULL(attached_to_doctype, "NO DOCTYPE") as atd,
-                IFNULL(attached_to_name,"NO DOCNAME") as atn, file_available_on_server,
-                ROUND(file_size/1024,2) as size, lft, rgt, IFNULL(folder, "NO FOLDER") as folder, is_private,
-                important_document_for_archive, mark_for_deletion, owner, creation, file_url
-                FROM `tabFile` WHERE docstatus=0 %s ORDER BY creation""" % (conditions)
+            query = """
+                SELECT 
+                    name, IFNULL(file_name, "NO NAME") as file_name, 
+                    IFNULL(attached_to_doctype, "NO DOCTYPE") as atd,
+                    IFNULL(attached_to_name,"NO DOCNAME") as atn, 
+                    file_available_on_server,
+                    ROUND(file_size/1024, 2) as size, lft, rgt, 
+                    IFNULL(folder, "NO FOLDER") as folder, is_private,
+                    important_document_for_archive, mark_for_deletion, owner, creation, file_url
+                FROM `tabFile` WHERE docstatus=0 %s ORDER BY creation
+            """ % conditions
+            
             fd_data = frappe.db.sql(query, as_dict=1)
             for d in fd_data:
-                file_download_name = """<a href="%s" target="_blank">%s</a>""" % (d.file_url, d.file_name)
-                file_download_url = """<a href="%s" target="_blank">%s</a>""" % (d.file_url, d.file_url)
-                row = [d.name, file_download_name, d.atd, d.atn, d.file_available_on_server, d.size, d.lft, d.rgt, d.folder,
-                    d.is_private, d.important_document_for_archive, d.mark_for_deletion, d.owner, d.creation, file_download_url]
+                file_download_name = d.file_name
+                file_download_url = d.file_url
+                
+                if d.file_url:
+                    file_download_name = f'<a href="{d.file_url}" target="_blank">{d.file_name}</a>'
+                    file_download_url = f'<a href="{d.file_url}" target="_blank">{d.file_url}</a>'
+                    
+                row = [
+                    d.name, file_download_name, d.atd, d.atn, d.file_available_on_server, 
+                    d.size, d.lft, d.rgt, d.folder, d.is_private, d.important_document_for_archive, 
+                    d.mark_for_deletion, d.owner, d.creation, file_download_url
+                ]
                 data.append(row)
     return data
 

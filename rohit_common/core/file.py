@@ -6,6 +6,7 @@ from __future__ import unicode_literals
 import os
 import frappe
 from shutil import copyfile, move
+from frappe.permissions import SYSTEM_USER_ROLE, get_doctypes_with_read
 from frappe.share import get_share_name
 from frappe.utils import get_site_base_path, cstr
 from frappe.core.doctype.file.file import File, get_content_hash
@@ -22,30 +23,36 @@ def custom_file_permissions(doc, ptype=None, user=None):
     has_access = False
     user = user or frappe.session.user
     is_sys = check_system_manager(user)
+
+    # System Manager & Administrator always get full access
+    if user == "Administrator" or is_sys:
+        return True
+
+    # Check if shared
     shd_name = get_share_name(doctype=doc.doctype, name=doc.name, user=user, everyone=0)
     if shd_name:
         shd = frappe.get_doc("DocShare", shd_name)
         if shd.write or shd.share or shd.submit:
-            has_access = "write"
-        else:
-            has_access = "read"
-    elif ptype == "create":
-        has_access = frappe.has_permission("File", "create", user=user)
-    elif not doc.is_private or doc.owner in [user, "Guest"] \
-        or user == "Administrator" or is_sys == 1:
-        has_access = True
-    elif doc.attached_to_doctype and doc.attached_to_name:
-        attached_to_doctype = doc.attached_to_doctype
-        attached_to_name = doc.attached_to_name
-        try:
-            ref_doc = frappe.get_doc(attached_to_doctype, attached_to_name)
+            return True
+        return True
 
+    # Creating a new file
+    if ptype == "create":
+        return frappe.has_permission("File", "create", user=user)
+
+    # Public file or owner
+    if not doc.is_private or doc.owner in [user, "Guest"]:
+        return True
+
+    # If attached → check permission on parent doc
+    if doc.attached_to_doctype and doc.attached_to_name:
+        try:
+            ref_doc = frappe.get_doc(doc.attached_to_doctype, doc.attached_to_name)
             if ptype in ["write", "create", "delete"]:
                 has_access = ref_doc.has_permission("write")
-
                 if ptype == "delete" and not has_access:
                     frappe.throw(
-                        _(
+                        (
                             f"Cannot delete file as it belongs to {frappe.get_desk_link(doc.attached_to_doctype, doc.attached_to_name)} for which you do not have permissions"
                         ),
                         frappe.PermissionError,
@@ -59,6 +66,41 @@ def custom_file_permissions(doc, ptype=None, user=None):
 
     return has_access
 
+def custom_get_permission_query_conditions(user: str | None = None) -> str:
+	user = user or frappe.session.user
+
+	if user == "Administrator" or check_system_manager(user):
+		return ""
+
+	if SYSTEM_USER_ROLE not in frappe.get_roles(user):
+		# Basic user: return only own files or shared
+		return f"""
+			`tabFile`.`owner` = {frappe.db.escape(user)}
+			OR EXISTS (
+				SELECT 1 FROM `tabDocShare`
+				WHERE
+					`tabDocShare`.share_doctype = 'File'
+					AND `tabDocShare`.share_name = `tabFile`.name
+					AND `tabDocShare`.user = {frappe.db.escape(user)}
+					AND `tabDocShare`.read = 1
+			)
+		"""
+
+	# For system users, include additional readable doctypes and shares
+	readable_doctypes = ", ".join(repr(dt) for dt in get_doctypes_with_read())
+	return f"""
+		(`tabFile`.`is_private` = 0)
+		OR (`tabFile`.`attached_to_doctype` IS NULL AND `tabFile`.`owner` = {frappe.db.escape(user)})
+		OR (`tabFile`.`attached_to_doctype` IN ({readable_doctypes}))
+		OR EXISTS (
+			SELECT 1 FROM `tabDocShare`
+			WHERE
+				`tabDocShare`.share_doctype = 'File'
+				AND `tabDocShare`.share_name = `tabFile`.name
+				AND `tabDocShare`.user = {frappe.db.escape(user)}
+				AND `tabDocShare`.read = 1
+		)
+	"""
 
 @frappe.whitelist()
 def get_files_by_search_text(text):
@@ -503,8 +545,10 @@ def change_file_path(fd):
             frappe.db.set_value("File", fd.name, "file_available_on_server", 1)
             frappe.db.set_value("File", fd.name, "is_private", 1)
     else:
-        print("File Name is Not There hence Exiting")
-        exit()
+        frappe.throw("File Name is Not There hence Exiting")
+        return
+        # print("File Name is Not There hence Exiting")
+        # exit()
 
 
 def delete_only_file_doc(fd, comment=None, ref_doc_exists=1):

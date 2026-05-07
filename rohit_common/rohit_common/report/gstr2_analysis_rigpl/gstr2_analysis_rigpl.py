@@ -3,7 +3,7 @@
 
 from __future__ import unicode_literals
 import frappe
-from frappe.utils import getdate
+from frappe.utils import getdate, flt
 from datetime import datetime
 
 
@@ -20,93 +20,171 @@ def get_data(filters):
 		gst_set = frappe.get_doc("GST Settings", "GST Setting")
 		gst_taxes = []
 		for d in gst_set.gst_accounts:
-			if d.get("cgst_account", "") and "Input" in d.get("cgst_account", "No"):
-				gst_taxes.append(d.cgst_account)
-			if d.get("sgst_account", "") and  "Input" in d.get("sgst_account", "No"):
-				gst_taxes.append(d.sgst_account)
-			if d.get("igst_account", "") and "Input" in d.get("igst_account", "No"):
-				gst_taxes.append(d.igst_account)
-			if d.get("cess_account", "") and "Input" in d.get("cess_account", "No"):
-				gst_taxes.append(d.cess_account)
-		main_gl = []
-		for tax in gst_taxes:
-			gl_entries = get_gl_entries(tax, cond)
-			for gl in gl_entries:
-				gl = get_party_details(gl)
-				gl = get_gstr2_details(gl)
-				cgst, sgst, igst, cess = 0, 0, 0, 0
-				if "CGST" in tax:
-					if gl.debit > 0:
-						cgst = gl.debit
-					else:
-						cgst = -1 * gl.credit
-				if "IGST" in tax:
-					if gl.debit > 0:
-						igst = gl.debit
-					else:
-						igst = -1 * gl.credit
-				if "SGST" in tax:
-					if gl.debit > 0:
-						sgst = gl.debit
-					else:
-						sgst = -1 * gl.credit
-				if "CESS" in tax:
-					if gl.debit > 0:
-						cess = gl.debit
-					else:
-						cess = -1 * gl.credit
-				gstr2_tot_tax = gl.get("gstr2_igst", 0) + gl.get("gstr2_cgst", 0) + gl.get("gstr2_sgst", 0) + \
-								gl.get("gstr2_cess", 0)
-				doc_tot_tax = igst + cgst + sgst + cess
-				gl["gstr2_tot_tax"] = gstr2_tot_tax
-				gl["doc_tot_tax"] = doc_tot_tax
-				gl["doc_igst"] = igst
-				gl["doc_sgst"] = sgst
-				gl["doc_cgst"] = cgst
-				gl["doc_cess"] = cess
-				found = 0
-				for d in main_gl:
-					if d.get("voucher_type") == gl.get("voucher_type") and d.get("voucher_no") == gl.get("voucher_no"):
-						d["doc_tot_tax"] += gl.get("doc_tot_tax")
-						d["doc_igst"] += gl.get("doc_igst")
-						d["doc_sgst"] += gl.get("doc_sgst")
-						d["doc_cgst"] += gl.get("doc_cgst")
-						d["doc_cess"] += gl.get("doc_cess")
-						found = 1
-				if found != 1:
-					main_gl.append(gl.copy())
-		for gl in main_gl:
-			row = [gl.posting_date, gl.voucher_no, gl.get("party", ""),
-				   gl.get("gstr1_stat", 0), gl.get("gstr1_fil_date", "1900-01-01"),
-				   gl.get("period_gstr1", ""), gl.get("gstr2b_date", "1900-01-01"),
-				   gl.get("gstr2b_period", "X"), gl.get("gstr3b_stat", 0),
-				   gl.get("party_gstin", ""), gl.get("note_type", "X"), gl.get("sup_inv_no", ""),
-				   gl.get("sup_inv_date", "1900-01-01"),
-				   gl.get("gstr2_gt", 0), gl.get("gstr2_nt", 0), gl.get("gstr2_igst", 0), gl.get("gstr2_cgst", 0),
-				   gl.get("gstr2_sgst", 0), gl.get("gstr2_cess", 0), gl.get("gstr2_tot_tax", 0), gl.get("doc_gt", 0),
-				   gl.get("doc_nt", 0), gl.get("doc_igst", 0), gl.get("doc_cgst", 0), gl.get("doc_sgst", 0),
-				   gl.get("doc_cess", 0), gl.get("doc_tot_tax", 0), gl.voucher_type, gl.get("party_type", ""),
-				   gl.get("gstr2a_name", "")]
+			for field in ["cgst_account", "sgst_account", "igst_account", "cess_account"]:
+				acc = d.get(field)
+				if acc and "Input" in acc:
+					gst_taxes.append(acc)
+		
+		gst_taxes = list(set(gst_taxes))
+		if not gst_taxes:
+			return []
+
+		# Fetch all relevant GL entries first
+		all_gl_entries = frappe.db.sql("""
+			SELECT 
+				name, posting_date, account, debit_in_account_currency as debit, 
+				credit_in_account_currency as credit, voucher_type, voucher_no 
+			FROM `tabGL Entry` gl
+			WHERE docstatus = 1 AND gl.account IN (%s) %s 
+			ORDER BY gl.posting_date, gl.name
+		""" % (', '.join(['%s']*len(gst_taxes)), cond), tuple(gst_taxes), as_dict=1)
+
+		if not all_gl_entries:
+			return []
+
+		# Collect unique vouchers for bulk fetching
+		vouchers_by_type = {}
+		for gl in all_gl_entries:
+			vouchers_by_type.setdefault(gl.voucher_type, set()).add(gl.voucher_no)
+
+		# Bulk fetch Purchase Invoice details
+		pi_details = {}
+		if "Purchase Invoice" in vouchers_by_type:
+			pi_data = frappe.get_all("Purchase Invoice", 
+				filters={"name": ["in", list(vouchers_by_type["Purchase Invoice"])]},
+				fields=["name", "supplier", "supplier_gstin", "bill_no", "bill_date", 
+						"base_grand_total", "base_net_total", "shipping_address"])
+			pi_details = {d.name: d for d in pi_data}
+
+		# Bulk fetch Non-PI Grand Totals (total_debit)
+		non_pi_totals = {}
+		for vtype, vnos in vouchers_by_type.items():
+			if vtype != "Purchase Invoice":
+				try:
+					# Standard vouchers have a total_debit or base_grand_total field
+					fields = ["name", "total_debit"]
+					if vtype == "Journal Entry":
+						fields = ["name", "total_debit"]
+					
+					totals_data = frappe.get_all(vtype, filters={"name": ["in", list(vnos)]}, fields=fields)
+					for t in totals_data:
+						non_pi_totals[(vtype, t.name)] = t.get(fields[1], 0)
+				except Exception:
+					pass
+
+		# Bulk fetch GSTR2 details
+		gstr2_map = get_bulk_gstr2_details(vouchers_by_type, pi_details)
+		
+		main_gl_map = {} # Key: (voucher_type, voucher_no)
+
+		for gl in all_gl_entries:
+			key = (gl.voucher_type, gl.voucher_no)
+			
+			if key not in main_gl_map:
+				# Initialize entry with basic details and party info
+				entry = gl.copy()
+				if gl.voucher_type == "Purchase Invoice":
+					pi = pi_details.get(gl.voucher_no)
+					if pi:
+						entry.update({
+							"party_type": "Supplier",
+							"party": pi.supplier,
+							"party_gstin": pi.supplier_gstin,
+							"sup_inv_no": pi.bill_no,
+							"sup_inv_date": pi.bill_date,
+							"doc_gt": pi.base_grand_total,
+							"doc_nt": pi.base_net_total
+						})
+				else:
+					entry["doc_gt"] = non_pi_totals.get((gl.voucher_type, gl.voucher_no), 0)
+
+				# Apply GSTR2 data if found
+				gstr2_info = gstr2_map.get(key)
+				if gstr2_info:
+					mf = -1 if gstr2_info.note_type == "Credit Note" else 1
+					entry.update({
+						"gstr1_stat": gstr2_info.filing_status_gstr1,
+						"gstr2b_date": gstr2_info.gstr2b_date,
+						"gstr2b_period": gstr2_info.gstr2b_period,
+						"period_gstr1": gstr2_info.filing_period_gstr1,
+						"note_type": gstr2_info.note_type,
+						"gstr3b_stat": 1 if gstr2_info.note_type == "Bill of Entry" else gstr2_info.filing_status_gstr3b,
+						"gstr1_fil_date": gstr2_info.supplier_invoice_date if gstr2_info.note_type == "Bill of Entry" else gstr2_info.filing_date_gstr1,
+						"gstr2_gt": gstr2_info.grand_total * mf,
+						"gstr2_nt": gstr2_info.taxable_value * mf,
+						"gstr2_igst": gstr2_info.igst_amount * mf,
+						"gstr2_cgst": gstr2_info.cgst_amount * mf,
+						"gstr2_sgst": gstr2_info.sgst_amount * mf,
+						"gstr2_cess": gstr2_info.cess_amount * mf,
+						"gstr2a_name": gstr2_info.parent
+					})
+					
+					if gstr2_info.note_type == "Bill of Entry":
+						entry["sup_inv_date"] = gstr2_info.supplier_invoice_date
+						entry["sup_inv_no"] = gstr2_info.supplier_invoice_no
+						entry["party_gstin"] = gstr2_info.party_gstin
+
+				# Initialize tax buckets
+				for tax_field in ["doc_igst", "doc_sgst", "doc_cgst", "doc_cess", "doc_tot_tax"]:
+					entry[tax_field] = 0
+				
+				main_gl_map[key] = entry
+
+			# Accumulate tax from the current GL entry
+			entry = main_gl_map[key]
+			tax_val = gl.debit if gl.debit > 0 else -gl.credit
+			
+			if "IGST" in gl.account:
+				entry["doc_igst"] += tax_val
+			elif "CGST" in gl.account:
+				entry["doc_cgst"] += tax_val
+			elif "SGST" in gl.account:
+				entry["doc_sgst"] += tax_val
+			elif "CESS" in gl.account:
+				entry["doc_cess"] += tax_val
+			
+			entry["doc_tot_tax"] += tax_val
+
+		# Final Row Assembly
+		for gl in main_gl_map.values():
+			gstr2_tot_tax = flt(gl.get("gstr2_igst", 0)) + flt(gl.get("gstr2_cgst", 0)) + \
+							flt(gl.get("gstr2_sgst", 0)) + flt(gl.get("gstr2_cess", 0))
+			
+			row = [
+				gl.posting_date, gl.voucher_no, gl.get("party", ""),
+				gl.get("gstr1_stat", 0), gl.get("gstr1_fil_date", "1900-01-01"),
+				gl.get("period_gstr1", ""), gl.get("gstr2b_date", "1900-01-01"),
+				gl.get("gstr2b_period", "X"), gl.get("gstr3b_stat", 0),
+				gl.get("party_gstin", ""), gl.get("note_type", "X"), gl.get("sup_inv_no", ""),
+				gl.get("sup_inv_date", "1900-01-01"),
+				gl.get("gstr2_gt", 0), gl.get("gstr2_nt", 0), gl.get("gstr2_igst", 0), gl.get("gstr2_cgst", 0),
+				gl.get("gstr2_sgst", 0), gl.get("gstr2_cess", 0), gstr2_tot_tax, gl.get("doc_gt", 0),
+				gl.get("doc_nt", 0), gl.get("doc_igst", 0), gl.get("doc_cgst", 0), gl.get("doc_sgst", 0),
+				gl.get("doc_cess", 0), gl.get("doc_tot_tax", 0), gl.voucher_type, gl.get("party_type", ""),
+				gl.get("gstr2a_name", "")
+			]
 			data.append(row)
 	else:
+		# GSTIN Wise logic remains mostly as is but uses parameter binding
 		ret_period = get_ret_period(filters)
+		cond = ""
 		if getdate(filters.get("from_date")) < datetime.strptime("01-07-2020", "%d-%m-%Y").date():
-			cond = f" AND gri.filing_period_gstr1 = '{ret_period}' AND gri.gstr2b_period IS NULL"
+			cond = " AND gri.filing_period_gstr1 = %(ret_period)s AND gri.gstr2b_period IS NULL"
 		else:
-			cond = f" AND gri.gstr2b_period = '{ret_period}'"
-		query = """SELECT gr.name, gri.gstr2b_period, gri.party_type, gri.party, gri.party_gstin, gri.note_type, 
-		gri.supplier_invoice_no, gri.supplier_invoice_date, gri.linked_document_type, gri.linked_document_name,
-		gri.posting_date, gri.grand_total, gri.taxable_value, gri.igst_amount, gri.cgst_amount, gri.sgst_amount, 
-		gri.cess_amount, gri.filing_date_gstr1, gri.gstr2b_date, gri.filing_status_gstr3b, gri.filing_period_gstr1
-		FROM `tabGSTR2A RIGPL` gr, `tabGSTR2 Return Invoices` gri
-		WHERE gri.parent = gr.name AND gr.docstatus < 2 %s
-		ORDER BY gri.party, gri.posting_date""" % cond
-		gstr2ab = frappe.db.sql(query, as_dict=1)
+			cond = " AND gri.gstr2b_period = %(ret_period)s"
+			
+		gstr2ab = frappe.db.sql("""
+			SELECT gr.name, gri.gstr2b_period, gri.party_type, gri.party, gri.party_gstin, gri.note_type, 
+			gri.supplier_invoice_no, gri.supplier_invoice_date, gri.linked_document_type, gri.linked_document_name,
+			gri.posting_date, gri.grand_total, gri.taxable_value, gri.igst_amount, gri.cgst_amount, gri.sgst_amount, 
+			gri.cess_amount, gri.filing_date_gstr1, gri.gstr2b_date, gri.filing_status_gstr3b, gri.filing_period_gstr1
+			FROM `tabGSTR2A RIGPL` gr, `tabGSTR2 Return Invoices` gri
+			WHERE gri.parent = gr.name AND gr.docstatus < 2 %s
+			ORDER BY gri.party, gri.posting_date
+		""" % cond, {"ret_period": ret_period}, as_dict=1)
+
 		for d in gstr2ab:
-			if d.note_type == "Credit Note":
-				mf = -1
-			else:
-				mf = 1
+			mf = -1 if d.note_type == "Credit Note" else 1
 			row = [d.posting_date, d.linked_document_name, d.party, 1, d.filing_date_gstr1, d.filing_period_gstr1,
 				   d.gstr2b_date, d.gstr2b_period, d.filing_status_gstr3b, d.party_gstin, d.note_type,
 				   d.supplier_invoice_no, d.supplier_invoice_date, d.grand_total*mf, d.taxable_value*mf,
@@ -115,6 +193,62 @@ def get_data(filters):
 				   d.linked_document_type, d.party_type, d.name]
 			data.append(row)
 	return data
+
+
+def get_bulk_gstr2_details(vouchers_by_type, pi_details):
+	gstr2_map = {}
+	
+	# Pre-fetch address GSTINs
+	address_map = {}
+	relevant_addresses = [d.shipping_address for d in pi_details.values() if d.shipping_address]
+	if relevant_addresses:
+		addr_data = frappe.get_all("Address", 
+			filters={"name": ["in", relevant_addresses]}, 
+			fields=["name", "gstin"])
+		address_map = {d.name: d.gstin for d in addr_data}
+
+	# Gather all possible matching numbers (Voucher Nos + Bill Nos)
+	matches = []
+	for v_list in vouchers_by_type.values():
+		matches.extend(list(v_list))
+	for pi in pi_details.values():
+		if pi.bill_no:
+			matches.append(pi.bill_no)
+	
+	if not matches:
+		return {}
+
+	# Fetch ALL potential GSTR2 matches in one go
+	res = frappe.db.sql("""
+		SELECT gstri.*, gstr.gstin as receiver_gstin
+		FROM `tabGSTR2 Return Invoices` gstri
+		JOIN `tabGSTR2A RIGPL` gstr ON gstri.parent = gstr.name
+		WHERE gstr.docstatus != 2 
+		AND (gstri.linked_document_name IN %(matches)s OR gstri.supplier_invoice_no IN %(matches)s)
+	""", {"matches": list(set(matches))}, as_dict=1)
+
+	# Replicate the strict mapping logic in Python memory
+	for vtype, vnos_set in vouchers_by_type.items():
+		for vno in vnos_set:
+			if vtype == "Purchase Invoice":
+				pi = pi_details.get(vno)
+				if not pi: continue
+				self_gstin = address_map.get(pi.shipping_address)
+				
+				# Check for a match using the 4 strict PI rules
+				for d in res:
+					if d.receiver_gstin == self_gstin and d.party == pi.supplier and d.party_type == "Supplier":
+						if d.linked_document_name == vno or (pi.bill_no and d.supplier_invoice_no == pi.bill_no):
+							gstr2_map[(vtype, vno)] = d
+							break
+			else:
+				# Standard matching for Non-PI vouchers
+				for d in res:
+					if d.linked_document_type == vtype and d.linked_document_name == vno:
+						gstr2_map[(vtype, vno)] = d
+						break
+
+	return gstr2_map
 
 
 def get_ret_period(filters):
@@ -134,80 +268,6 @@ def get_ret_period(filters):
 				return ret_period
 		else:
 			return datetime.strftime(frm_date, "%b") + "-" + datetime.strftime(frm_date, "%y")
-
-
-def get_gstr2_details(gl):
-	cond = ""
-	cond_or = ""
-	if gl.voucher_type == "Purchase Invoice":
-		cond_or += f" AND (gstri.supplier_invoice_no = '{gl.sup_inv_no}' OR " \
-				   f"gstri.linked_document_name = '{gl.voucher_no}')"
-		self_add = frappe.get_value(gl.voucher_type, gl.voucher_no, "shipping_address")
-		self_gstin = frappe.get_value("Address", self_add, "gstin")
-		cond += f" AND gstr.gstin = '{self_gstin}'"
-		cond += f" AND gstri.party = '{gl.party}' AND gstri.party_type = '{gl.party_type}'"
-	else:
-		cond += f" AND gstri.linked_document_type = '{gl.voucher_type}' AND " \
-				f"gstri.linked_document_name = '{gl.voucher_no}'"
-
-	query = """SELECT gstr.name, gstri.filing_status_gstr1, gstri.filing_date_gstr1, gstri.filing_status_gstr3b,
-	gstri.filing_period_gstr1, gstri.note_type, gstri.grand_total, gstri.taxable_value, gstri.cgst_amount, 
-	gstri.sgst_amount, gstri.igst_amount, gstri.cess_amount, gstri.supplier_invoice_no, gstri.supplier_invoice_date,
-	gstri.party_gstin, gstri.gstr2b_date, gstri.gstr2b_period
-	FROM `tabGSTR2A RIGPL` gstr, `tabGSTR2 Return Invoices` gstri
-	WHERE gstr.docstatus != 2 AND gstri.parent = gstr.name %s %s""" % (cond, cond_or)
-	gstr2a_list = frappe.db.sql(query, as_dict=1)
-	if gstr2a_list:
-		gl["gstr1_stat"] = gstr2a_list[0].filing_status_gstr1
-		if gstr2a_list[0].note_type == "Bill of Entry":
-			mf = 1
-			gl["gstr3b_stat"] = 1
-			gl["gstr1_fil_date"] = gstr2a_list[0].supplier_invoice_date
-			gl["sup_inv_date"] = gstr2a_list[0].supplier_invoice_date
-			gl["sup_inv_no"] = gstr2a_list[0].supplier_invoice_no
-			gl["party_gstin"] = gstr2a_list[0].party_gstin
-		elif gstr2a_list[0].note_type == "Credit Note":
-			mf = -1
-		else:
-			mf = 1
-			gl["gstr3b_stat"] = gstr2a_list[0].filing_status_gstr3b
-			gl["gstr1_fil_date"] = gstr2a_list[0].filing_date_gstr1
-
-		gl["gstr2b_date"] = gstr2a_list[0].gstr2b_date
-		gl["gstr2b_period"] = gstr2a_list[0].gstr2b_period
-		gl["period_gstr1"] = gstr2a_list[0].filing_period_gstr1
-		gl["note_type"] = gstr2a_list[0].note_type
-		gl["gstr2_gt"] = gstr2a_list[0].grand_total * mf
-		gl["gstr2_nt"] = gstr2a_list[0].taxable_value * mf
-		gl["gstr2_cgst"] = gstr2a_list[0].cgst_amount * mf
-		gl["gstr2_sgst"] = gstr2a_list[0].sgst_amount * mf
-		gl["gstr2_igst"] = gstr2a_list[0].igst_amount * mf
-		gl["gstr2_cess"] = gstr2a_list[0].cess_amount * mf
-		gl["gstr2a_name"] = gstr2a_list[0].name
-	return gl
-
-
-def get_party_details(gl_dict):
-	pid = frappe.get_doc(gl_dict.voucher_type, gl_dict.voucher_no)
-	if gl_dict.voucher_type == "Purchase Invoice":
-		gl_dict["party_type"] = "Supplier"
-		gl_dict["party"] = pid.supplier
-		gl_dict["party_gstin"] = pid.supplier_gstin
-		gl_dict["sup_inv_no"] = pid.bill_no
-		gl_dict["sup_inv_date"] = pid.bill_date
-		gl_dict["doc_gt"] = pid.base_grand_total
-		gl_dict["doc_nt"] = pid.base_net_total
-	else:
-		gl_dict["doc_gt"] = pid.total_debit
-	return gl_dict
-
-
-def get_gl_entries(tax, conditions):
-	cond_acc = f" AND gl.account = '{tax}'"
-	gl_map = frappe.db.sql("""SELECT gl.name, gl.posting_date, gl.account, gl.debit_in_account_currency as debit, 
-	gl.credit_in_account_currency as credit, gl.voucher_type, gl.voucher_no FROM `tabGL Entry` gl 
-	WHERE docstatus = 1 %s %s ORDER BY gl.posting_date, gl.name""" % (cond_acc, conditions), as_dict=1)
-	return gl_map
 
 
 def get_columns(filters):

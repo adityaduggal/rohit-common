@@ -5,56 +5,124 @@
 # This Scheduled Tasks Would Periodically check the table TabVersion and delete from them old entries.
 # Based on Reference Doctype mentioned in the Rohit Settings.
 
-from __future__ import unicode_literals
 import time
 import frappe
-from frappe.utils import flt
+from frappe.utils import flt, nowdate, add_days
 from frappe.utils.background_jobs import enqueue
+
+log = frappe.logger("version_cleanup")
+
+BATCH_SIZE = 5000
 
 
 def enqueue_deletion():
     enqueue(execute, queue="long", timeout=3600)
 
 
+def delete_versions(query, params):
+    """
+    Deletes versions using SQL batching
+    """
+    deleted = 0
+
+    while True:
+
+        rows = frappe.db.sql(
+            f"""
+            SELECT name
+            FROM `tabVersion`
+            {query}
+            LIMIT %s
+            """,
+            params + (BATCH_SIZE,),
+            as_dict=True,
+        )
+
+        if not rows:
+            break
+
+        names = [r.name for r in rows]
+
+        frappe.db.sql(
+            f"""
+            DELETE FROM `tabVersion`
+            WHERE name IN ({",".join(["%s"] * len(names))})
+            """,
+            names,
+        )
+
+        frappe.db.commit()
+
+        deleted += len(names)
+
+        log.info(f"Deleted {deleted} versions so far")
+
+    return deleted
+
+
 def execute():
-    st_time = time.time()
-    rset = frappe.get_single("Rohit Settings")
-    max_days = flt(rset.max_days_to_keep_version)
-    dt_list = []
-    for row in rset.auto_delete_from_version:
-        dt_list.append(row.document_type)
-    if max_days == 0:
-        max_days = 30
 
-    # First delete all items except for the ones in table which are above the max days
-    query = """SELECT name, creation, ref_doctype, docname FROM `tabVersion` WHERE ref_doctype NOT IN %s
-    AND creation <= (DATE_SUB(CURDATE(), INTERVAL %s DAY))""" % (tuple(dt_list), max_days)
-    un_regulated_version = frappe.db.sql(query, as_dict=1)
-    deleted_0 = 0
-    deleted_1 = 0
-    for d in un_regulated_version:
-        print(f"Deleting Versions for All Un-Listed Doctypes older than {max_days} Days")
-        deleted_0 += 1
-        frappe.delete_doc("Version", d.name, for_reload=1)
-        if deleted_0 % 2000 == 0 and deleted_0 > 0:
-            frappe.db.commit()
-            print(f"Committing After {deleted_0} deletions. Time Elapsed {int(time.time() - st_time)} seconds")
-    for row in rset.auto_delete_from_version:
-        # dt_conds = ""
-        # if row.doctype_conditions:
-        #    dt_conds = " AND %s" % row.doctype_conditions
+    start = time.time()
 
-        max_days = flt(row.days_to_keep) if flt(row.days_to_keep) > 0 else 1
-        print(f"Deleting Versions for {row.document_type} older than {max_days} Days")
-        query = """SELECT name, creation, ref_doctype, docname FROM `tabVersion` WHERE ref_doctype = '%s'
-        AND creation <= (DATE_SUB(CURDATE(), INTERVAL %s DAY))""" % (row.document_type, max_days)
-        reg_version = frappe.db.sql(query, as_dict=1)
-        for d in reg_version:
-            deleted_1 += 1
-            frappe.delete_doc("Version", d.name, for_reload=1)
-            if deleted_1  % 2000 == 0 and deleted_1 > 0:
-                frappe.db.commit()
-                print(f"Committing After {deleted_1} deletions. Time Elapsed {int(time.time() - st_time)} seconds")
-    tot_time = int(time.time() - st_time)
-    print(f"Total Versions Deleted = {deleted_0 + deleted_1}")
-    print(f"Total Time Taken = {tot_time} seconds")
+    settings = frappe.get_single("Rohit Settings")
+
+    max_days = int(flt(settings.max_days_to_keep_version) or 30)
+
+    cutoff = add_days(nowdate(), -max_days)
+
+    dt_list = [row.document_type for row in settings.auto_delete_from_version]
+
+    # -------------------------
+    # Unregulated doctypes
+    # -------------------------
+
+    if dt_list:
+
+        placeholders = ", ".join(["%s"] * len(dt_list))
+
+        query = f"""
+        WHERE ref_doctype NOT IN ({placeholders})
+        AND creation <= %s
+        """
+
+        params = tuple(dt_list) + (cutoff,)
+
+    else:
+
+        query = """
+        WHERE creation <= %s
+        """
+
+        params = (cutoff,)
+
+    deleted_unregulated = delete_versions(query, params)
+
+    # -------------------------
+    # Regulated doctypes
+    # -------------------------
+
+    deleted_regulated = 0
+
+    for row in settings.auto_delete_from_version:
+
+        days = int(flt(row.days_to_keep) or 1)
+
+        cutoff = add_days(nowdate(), -days)
+
+        log.info(
+            f"Deleting versions for {row.document_type} older than {days} days"
+        )
+
+        query = """
+        WHERE ref_doctype = %s
+        AND creation <= %s
+        """
+
+        params = (row.document_type, cutoff)
+
+        deleted_regulated += delete_versions(query, params)
+
+    total = deleted_unregulated + deleted_regulated
+
+    log.info(f"Total Versions Deleted = {total}")
+    log.info(f"Total runtime = {int(time.time() - start)}s")

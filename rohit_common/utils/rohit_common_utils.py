@@ -7,6 +7,8 @@ import re
 import time
 import frappe
 from frappe.utils import get_files_path
+from india_compliance.gst_india.constants import STATE_NUMBERS
+from india_compliance.gst_india.utils import get_place_of_supply_options
 
 
 def check_or_rename_doc(document, backend):
@@ -146,27 +148,57 @@ def check_system_manager(user):
     """
     Returns boolean for a system manager user
     """
-    sys_list = frappe.db.sql(f"""SELECT name FROM `tabHas Role` WHERE parenttype = 'User'
-        AND parent = '{user}' AND role = 'System Manager'""", as_list=1)
-    if sys_list:
-        return 1
-    else:
-        return 0
+    return "System Manager" in frappe.get_roles(user)
+    # sys_list = frappe.db.sql(f"""SELECT name FROM `tabHas Role` WHERE parenttype = 'User'
+    #     AND parent = '{user}' AND role = 'System Manager'""", as_list=1)
+    # if sys_list:
+    #     return 1
+    # else:
+    #     return 0
 
 
 def rebuild_tree(doctype, parent_field, group_field):
-    # call rebuild_node for all root nodes
-    # get all roots
+
     lft = 1
-    result = frappe.db.sql("SELECT name, %s, lft, rgt FROM `tab%s` WHERE `%s`='' or `%s` IS NULL "
-                           "ORDER BY name ASC" % (group_field, doctype, parent_field, parent_field), as_dict=1)
-    for r in result:
+
+    roots = frappe.db.sql(
+        f"""
+        SELECT name, `{group_field}`
+        FROM `tab{doctype}`
+        WHERE `{parent_field}` = '' OR `{parent_field}` IS NULL
+        ORDER BY name
+        """,
+        as_dict=True
+    )
+
+    frappe.db.auto_commit_on_many_writes = 1
+
+    for r in roots:
+
         if r.get(group_field) == 1:
-            rebuild_group(doctype, parent_field, r.name, group_field, lft)
+
+            lft = rebuild_group(
+                doctype,
+                parent_field,
+                r.name,
+                group_field,
+                lft
+            )
+
         else:
-            frappe.db.sql("""UPDATE `tab%s` SET lft=%s, rgt=%s WHERE name='%s'""" % (
-                doctype, lft, lft+1, r.name))
+
+            frappe.db.sql(
+                f"""
+                UPDATE `tab{doctype}`
+                SET lft=%s, rgt=%s
+                WHERE name=%s
+                """,
+                (lft, lft + 1, r.name),
+            )
+
             lft += 2
+
+    frappe.db.auto_commit_on_many_writes = 0
 
 
 def rebuild_group(doctype, parent_field, parent, group_field, left):
@@ -338,3 +370,34 @@ def fn_next_string(doc, s):
     if tail == 'N':
         return head+'P'
     return head + chr(ord(tail)+1)
+
+def normalize_place_of_supply(value: str | None) -> str | None:
+    """
+    Convert things like "Karnataka" into "29-Karnataka" using india_compliance constants.
+
+    Rules:
+    - If empty/None -> return None
+    - If value is in SPECIAL_POS_VALUES -> return as-is
+    - If value is already a valid PoS (e.g. "29-Karnataka") -> return as-is
+    - Else treat value as a state name and map via STATE_NUMBERS
+    - If no match -> throw the same error as india_compliance
+    """
+    VALID_POS_VALUES = set(get_place_of_supply_options())
+    SPECIAL_POS_VALUES = {"Exempted"}
+
+    if not value:
+        return None
+
+    value = str(value).strip()
+
+    if value in SPECIAL_POS_VALUES:
+        return value
+
+    if value in VALID_POS_VALUES:
+        return value
+
+    code = STATE_NUMBERS.get(value)
+    if code:
+        return f"{code}-{value}"
+    
+    return value  # Let india_compliance handle the error

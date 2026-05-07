@@ -12,6 +12,7 @@ Changing a folder sharing settings should change lower ones
 from __future__ import unicode_literals
 import frappe
 from frappe.utils.background_jobs import enqueue
+from rohit_common.utils.rohit_common_utils import check_system_manager
 
 
 def on_trash(doc, method):

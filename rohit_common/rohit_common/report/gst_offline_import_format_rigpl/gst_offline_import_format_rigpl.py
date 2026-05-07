@@ -64,59 +64,166 @@ def get_columns(filters):
 
 def get_data(filters):
     si_cond, pi_cond = get_conditions(filters)
+    data = []
+
     if filters.get("type") == 'Sales Invoice':
         if filters.get("item_wise") == 1:
-            data = frappe.db.sql("""SELECT si.name, si.posting_date, si.base_net_total,
-				si.base_grand_total,si.customer, si.shipping_address_name, si.taxes_and_charges,
-				ad.country
-				FROM `tabSales Invoice` si, `tabSales Taxes and Charges Template` stct, `tabAddress` ad
-				WHERE stct.name = si.taxes_and_charges AND ad.name = si.shipping_address_name
-					AND si.docstatus = 1 AND stct.is_export = 1 %s
-				ORDER BY si.posting_date, si.name""" %(si_cond), as_list=1)
+            data = frappe.db.sql("""
+                SELECT 
+                    si.name, si.posting_date, si.base_net_total,
+                    si.base_grand_total, si.customer, si.shipping_address_name, si.taxes_and_charges,
+                    ad.country
+                FROM `tabSales Invoice` si
+                JOIN `tabSales Taxes and Charges Template` stct ON stct.name = si.taxes_and_charges
+                JOIN `tabAddress` ad ON ad.name = si.shipping_address_name
+                WHERE si.docstatus = 1 AND stct.is_export = 1 %s
+                ORDER BY si.posting_date, si.name
+            """ % si_cond, as_list=1)
+            
         elif filters.get("hsn") == 1:
-            data = frappe.db.sql("""SELECT sid.item_code, it.customs_tariff_number, SUM(sid.qty),
-				it.stock_uom, SUM(sid.base_amount), SUM(sid.base_net_amount)
-				FROM `tabSales Invoice` si, `tabSales Invoice Item` sid, `tabItem` it
-				WHERE si.docstatus = 1 AND sid.parent = si.name
-					AND sid.item_code = it.name %s
-				GROUP BY sid.item_code
-				ORDER BY sid.item_code""" %(si_cond), as_list = 1)
+            data = frappe.db.sql("""
+                SELECT 
+                    sid.item_code, it.customs_tariff_number, SUM(sid.qty),
+                    it.stock_uom, SUM(sid.base_amount), SUM(sid.base_net_amount)
+                FROM `tabSales Invoice Item` sid
+                JOIN `tabSales Invoice` si ON sid.parent = si.name
+                JOIN `tabItem` it ON sid.item_code = it.name
+                WHERE si.docstatus = 1 %s
+                GROUP BY sid.item_code
+                ORDER BY sid.item_code
+            """ % si_cond, as_list=1)
+            
         else:
-            data = frappe.db.sql("""SELECT si.posting_date, si.name, si.base_net_total,
-				si.base_grand_total, si.customer, si.taxes_and_charges,
-				if(tax_template.is_export = 1, 'Y',''),
-				if(tax_template.is_export =1, 'Export with Payment of GST or Export without \
-				Payment of GST or SEZ or Deemed Export', ''),
-				if(tax_template.is_export =1, si.shipping_bill_number, ''),
-				if(tax_template.is_export =1, si.shipping_bill_date, ''),
-				if(tax_template.is_export =1, si.port_code, ''),
-				if(tax_template.is_export =1, cn.code, ''),
-				si.customer_address, ad.address_title, ad.city, ad.pincode, ad.state_rigpl,
-				ad.gstin,
-				si.shipping_address_name, ad2.address_title, ad2.city, ad2.pincode, ad2.state_rigpl,
-				ad2.gstin, if(tax_template.is_local_sales = 1,9, ''), 0,
-				if(tax_template.is_local_sales = 1,9, ''), 0,
-				if(tax_template.is_local_sales != 1,18, ''), 0
-				FROM `tabSales Invoice` si, `tabAddress` ad, `tabAddress` ad2, `tabCountry` cn,
-					`tabSales Taxes and Charges Template` tax_template
-				WHERE ad.name = si.customer_address AND cn.name = ad.country
-					AND ad2.name = si.shipping_address_name
-					AND si.taxes_and_charges = tax_template.name
-					AND si.docstatus != 2 %s""" %(si_cond), as_list=1)
+            # 1. Fetch Invoice Headers first (Targeted Fetch)
+            invoice_headers = frappe.db.sql("""
+                SELECT 
+                    si.posting_date, si.name, si.base_net_total,
+                    si.base_grand_total, si.customer, si.taxes_and_charges,
+                    IF(tax_template.is_export = 1, 'Y', '') as is_export,
+                    IF(tax_template.is_export = 1, 'Export with Payment of GST or Export without Payment of GST or SEZ or Deemed Export', '') as export_text,
+                    IF(tax_template.is_export = 1, si.shipping_bill_number, '') as shipping_bill_number,
+                    IF(tax_template.is_export = 1, si.shipping_bill_date, '') as shipping_bill_date,
+                    IF(tax_template.is_export = 1, si.port_code, '') as port_code,
+                    IF(tax_template.is_export = 1, cn.code, '') as country_code,
+                    si.customer_address, 
+                    ad.address_title as billing_name, ad.city as billing_city, ad.pincode as billing_pincode, ad.state_rigpl as billing_state, ad.gstin as billing_gstin,
+                    si.shipping_address_name, 
+                    ad2.address_title as shipping_name, ad2.city as shipping_city, ad2.pincode as shipping_pincode, ad2.state_rigpl as shipping_state, ad2.gstin as shipping_gstin
+                FROM `tabSales Invoice` si
+                INNER JOIN `tabSales Taxes and Charges Template` tax_template ON si.taxes_and_charges = tax_template.name
+                LEFT JOIN `tabAddress` ad ON ad.name = si.customer_address
+                LEFT JOIN `tabAddress` ad2 ON ad2.name = si.shipping_address_name
+                LEFT JOIN `tabCountry` cn ON cn.name = ad.country
+                WHERE si.docstatus != 2 %s
+                ORDER BY si.posting_date, si.name
+            """ % si_cond, as_dict=1)
+
+            if not invoice_headers:
+                return []
+
+            # 2. Bulk fetch only required tax entries (Efficient)
+            invoice_names = [d['name'] for d in invoice_headers]
+            taxes_query = """
+                SELECT 
+                    parent,
+                    rate,
+                    base_tax_amount_after_discount_amount as amount,
+                    (account_head LIKE '%%CGST%%' OR description LIKE '%%CGST%%') as is_cgst,
+                    (account_head LIKE '%%SGST%%' OR description LIKE '%%SGST%%') as is_sgst,
+                    (account_head LIKE '%%IGST%%' OR description LIKE '%%IGST%%') as is_igst
+                FROM `tabSales Taxes and Charges`
+                WHERE parent IN ({})
+            """.format(", ".join(["%s"] * len(invoice_names)))
+            
+            taxes = frappe.db.sql(taxes_query, tuple(invoice_names), as_dict=1)
+
+            # 3. Aggregate in Python (O(N) Complexity)
+            tax_map = {}
+            for t in taxes:
+                p = t['parent']
+                if p not in tax_map:
+                    tax_map[p] = {'cr': 0, 'ca': 0, 'sr': 0, 'sa': 0, 'ir': 0, 'ia': 0}
+                
+                if t['is_cgst']:
+                    tax_map[p]['cr'] = max(tax_map[p]['cr'], t['rate'])
+                    tax_map[p]['ca'] += t['amount']
+                elif t['is_sgst']:
+                    tax_map[p]['sr'] = max(tax_map[p]['sr'], t['rate'])
+                    tax_map[p]['sa'] += t['amount']
+                elif t['is_igst']:
+                    tax_map[p]['ir'] = max(tax_map[p]['ir'], t['rate'])
+                    tax_map[p]['ia'] += t['amount']
+
+            # 4. Assembly
+            for d in invoice_headers:
+                t = tax_map.get(d['name'], {'cr': 0, 'ca': 0, 'sr': 0, 'sa': 0, 'ir': 0, 'ia': 0})
+                row = [
+                    d['posting_date'], d['name'], d['base_net_total'], d['base_grand_total'],
+                    d['customer'], d['taxes_and_charges'], d.get('is_export'),
+                    d.get('export_text'),
+                    d.get('shipping_bill_number'),
+                    d.get('shipping_bill_date'),
+                    d.get('port_code'),
+                    d.get('country_code'),
+                    d['customer_address'], d['billing_name'], d['billing_city'], d['billing_pincode'], d['billing_state'], d['billing_gstin'],
+                    d['shipping_address_name'], d['shipping_name'], d['shipping_city'], d['shipping_pincode'], d['shipping_state'], d['shipping_gstin'],
+                    t['cr'], t['ca'], t['sr'], t['sa'], t['ir'], t['ia']
+                ]
+                data.append(row)
+            
     elif filters.get("type") == 'Purchase Invoice':
-        data = frappe.db.sql("""SELECT pi.posting_date, pi.name,
-			pi.bill_date, pi.bill_no, pi.base_net_total,
-			pi.base_grand_total, pi.supplier, pi.taxes_and_charges,
-			IFNULL(adb.gstin, "NA"), IFNULL(ads.state_rigpl, "X"),
-			if(tax_template.is_import = 1, 'Y','N'), 'Input',
-			9,0,0
-			FROM `tabPurchase Invoice` pi, `tabAddress` ads,
-			`tabAddress` adb,
-			`tabPurchase Taxes and Charges Template` tax_template
-			WHERE adb.name = pi.supplier_address
-			AND ads.name = pi.shipping_address
-			AND pi.taxes_and_charges = tax_template.name
-			AND pi.docstatus != 2 %s""" %(pi_cond), as_list=1)
+        invoice_headers = frappe.db.sql("""
+            SELECT 
+                pi.posting_date, pi.name,
+                pi.bill_date, pi.bill_no, pi.base_net_total,
+                pi.base_grand_total, pi.supplier, pi.taxes_and_charges,
+                IFNULL(adb.gstin, "NA") as gstin, 
+                IFNULL(ads.state_rigpl, "X") as state,
+                IF(tax_template.is_import = 1, 'Y', 'N') as is_import
+            FROM `tabPurchase Invoice` pi
+            INNER JOIN `tabPurchase Taxes and Charges Template` tax_template ON pi.taxes_and_charges = tax_template.name
+            LEFT JOIN `tabAddress` adb ON adb.name = pi.supplier_address
+            LEFT JOIN `tabAddress` ads ON ads.name = pi.shipping_address
+            WHERE pi.docstatus != 2 %s
+            ORDER BY pi.posting_date, pi.name
+        """ % pi_cond, as_dict=1)
+
+        if not invoice_headers:
+            return []
+
+        invoice_names = [d['name'] for d in invoice_headers]
+        taxes_query = """
+            SELECT 
+                parent,
+                base_tax_amount_after_discount_amount as amount,
+                (account_head LIKE '%%CGST%%' OR description LIKE '%%CGST%%') as is_cgst,
+                (account_head LIKE '%%SGST%%' OR description LIKE '%%SGST%%') as is_sgst,
+                (account_head LIKE '%%IGST%%' OR description LIKE '%%IGST%%') as is_igst
+            FROM `tabPurchase Taxes and Charges`
+            WHERE parent IN ({})
+        """.format(", ".join(["%s"] * len(invoice_names)))
+        
+        taxes = frappe.db.sql(taxes_query, tuple(invoice_names), as_dict=1)
+
+        tax_map = {}
+        for t in taxes:
+            p = t['parent']
+            if p not in tax_map:
+                tax_map[p] = {'ca': 0, 'sa': 0, 'ia': 0}
+            if t['is_cgst']: tax_map[p]['ca'] += t['amount']
+            elif t['is_sgst']: tax_map[p]['sa'] += t['amount']
+            elif t['is_igst']: tax_map[p]['ia'] += t['amount']
+
+        for d in invoice_headers:
+            t = tax_map.get(d['name'], {'ca': 0, 'sa': 0, 'ia': 0})
+            row = [
+                d['posting_date'], d['name'], d['bill_date'], d['bill_no'],
+                d['base_net_total'], d['base_grand_total'], d['supplier'], d['taxes_and_charges'],
+                d['gstin'], d['state'], d['is_import'], 'Input',
+                t['ca'], t['sa'], t['ia']
+            ]
+            data.append(row)
+            
     return data
 
 

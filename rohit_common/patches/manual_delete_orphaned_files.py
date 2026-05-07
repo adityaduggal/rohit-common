@@ -21,9 +21,11 @@ def execute():
     if delete_file == "y" or delete_file == "n":
         pass
     else:
-        print("Wrong Input Enter either y or n. y = If you want to delete files and n = If you only want a list of "
-              "orphaned files at the end of this patch")
-        exit()
+        frappe.throw("Wrong Input Enter either y or n. y = If you want to delete files and n = If you only want a list of orphaned files at the end of this patch")
+        # print("Wrong Input Enter either y or n. y = If you want to delete files and n = If you only want a list of "
+        #       "orphaned files at the end of this patch")
+        # exit()
+        return
     st_time = time.time()
     public_files_path = get_files_path()
     private_files_path = get_files_path(is_private=1)

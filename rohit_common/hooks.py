@@ -12,12 +12,36 @@ app_url = "https://github.com/adityaduggal/rohit_common"
 app_version = "0.0.1"
 hide_in_installer = True
 
+required_apps = ["frappe/erpnext", "https://github.com/adityaduggal/india_compliance.git@develop"]
+
+
 # Fixtures help https://frappeframework.com/docs/v13/user/en/python-api/hooks#fixtures
-fixtures = []
+fixtures = [
+    {
+        "doctype": "Custom DocPerm",
+        "filters": [
+            [
+                "parent",
+                "in",
+                [
+                    "File",
+                    "Print Format",
+                    "Sales Invoice",
+                    "e-Invoice Log",
+                    "GSTR2A RIGPL",
+                    "GSTR-1",
+                    "Accounts Settings",
+                ],
+            ]
+        ],
+    },
+]
 
 override_whitelisted_methods = {  # Below mentod would also take into account the search fields
     # mentioned in the Customize form view
-    "frappe.core.doctype.file.file.get_files_by_search_text": "rohit_common.core.file.get_files_by_search_text"
+    # "frappe.core.doctype.file.file.get_files_by_search_text": "rohit_common.core.file.get_files_by_search_text",
+    "frappe.core.api.file.get_files_by_search_text": "rohit_common.core.file.get_files_by_search_text",
+    # "frappe.contacts.doctype.contact.contact.contact_query":"rohit_common.core.contact.custom_contact_query"
 }
 
 # Includes in <head>
@@ -66,6 +90,10 @@ has_permission = {
      "File": "rohit_common.core.file.custom_file_permissions"
 }
 
+permission_query_conditions = {
+	"File": "rohit_common.core.file.custom_get_permission_query_conditions",
+}
+
 # Javascripts for Standard Documents to Override Forms Script
 # -----------
 doctype_js = {
@@ -73,6 +101,7 @@ doctype_js = {
     "Asset": "public/js/asset.js",
     "Contact": "public/js/contact.js",
     "Sales Taxes and Charges Template": "public/js/stct.js",
+    "Sales Invoice": "public/js/transaction_override.js",
 }
 
 # Document Events
@@ -127,6 +156,10 @@ doc_events = {
         "validate": "rohit_common.rohit_common.validations.supplier.validate",
     },
     "User": {"validate": "rohit_common.rohit_common.validations.user.validate"},
+    "e-Invoice Log": {
+        "before_save": "rohit_common.custom_method.set_einvoice_log_status_in_sales_invoice",
+        "after_insert": "rohit_common.custom_method.sync_einvoice_log_to_reference"
+    },
     #   "*": {
     #       "on_update": "method",
     #       "on_cancel": "method",
@@ -164,7 +197,8 @@ scheduler_events = {
         "rohit_common.rohit_common.scheduled_tasks.auto_delete_version.enqueue_deletion",
         "rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files.execute",
     ],
-    "monthly": ["rohit_common.rohit_common.scheduled_tasks.email_queue_delete.execute"],
+    # No need for an email queue cleanup job it is handled automatically by Frappe.
+    # "monthly": ["rohit_common.rohit_common.scheduled_tasks.email_queue_delete.execute"],
 }
 
 # Testing
