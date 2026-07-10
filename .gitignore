@@ -3,3 +3,9 @@
 *.egg-info
 *.swp
 tags
+
+# ==========================================
+# Google Antigravity & AI Agent Tooling
+# ==========================================
+.agent/
+.antigravitycli
