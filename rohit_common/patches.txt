@@ -10,3 +10,4 @@ execute:frappe.delete_doc("Report", "Modified Purchase Register")
 rohit_common.patches.asset_correction
 rohit_common.patches.delete_custom_fields #2022-08-15
 rohit_common.patches.v13.reset_client_scripts
+rohit_common.patches.v13.truncate_sales_invoice
