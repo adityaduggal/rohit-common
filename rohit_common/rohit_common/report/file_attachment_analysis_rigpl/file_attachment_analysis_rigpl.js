@@ -5,18 +5,12 @@
 frappe.query_reports["File Attachment Analysis RIGPL"] = {
 	"filters": [
 		{
-			"fieldname":"summary_dt",
-			"label": "Summary Doctype Wise",
-			"fieldtype": "Check",
-			"reqd": 0,
-			"default":1
-		},
-		{
-			"fieldname":"summary_fol",
-			"label": "Summary Folder Wise",
-			"fieldtype": "Check",
-			"reqd": 0,
-			"default":0
+			"fieldname":"view_type",
+			"label": "View",
+			"fieldtype": "Select",
+			"options": "Summary Doctype Wise\nSummary Folder Wise\nDetail",
+			"reqd": 1,
+			"default": "Summary Doctype Wise"
 		},
 		{
 			"fieldname":"is_folder",
