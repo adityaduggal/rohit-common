@@ -64,6 +64,44 @@ class TestStockLedgerNormal(unittest.TestCase):
             if checked_types == set(party_field_by_type):
                 break
 
+    def test_locked_voucher_type_excluded_for_non_bypass_user(self):
+        """Regression guard for the transaction view-lock report-leak fix
+        (see rohit_common/rohit_common/validations/transaction_lock.py):
+        a Delivery Note older than its configured retention window must not
+        appear in this report for a user without the bypass role, even
+        though this report reads Stock Ledger Entry directly rather than
+        Delivery Note."""
+        filters = get_filters_with_enough_rows(min_rows=1)
+        if filters is None:
+            self.skipTest("Not enough Stock Ledger Entry data on this site to exercise the report")
+
+        settings = frappe.get_single("Rohit Settings")
+        original_locked_doctypes = [d.as_dict() for d in settings.locked_doctypes]
+        original_user = frappe.session.user
+        try:
+            settings.set("locked_doctypes", [])
+            settings.append(
+                "locked_doctypes", {"document_type": "Delivery Note", "days_to_keep": 1}
+            )
+            settings.save(ignore_permissions=True)
+            frappe.clear_cache(doctype="Rohit Settings")
+
+            frappe.set_user("Guest")
+            columns, data = execute(filters)
+            voucher_type_idx, posting_date_idx = 8, 0
+            from frappe.utils import add_days, getdate, nowdate
+
+            cutoff = getdate(add_days(nowdate(), -1))
+            for row in data:
+                if row[voucher_type_idx] == "Delivery Note":
+                    self.assertGreater(getdate(row[posting_date_idx]), cutoff)
+        finally:
+            frappe.set_user(original_user)
+            settings = frappe.get_single("Rohit Settings")
+            settings.set("locked_doctypes", original_locked_doctypes)
+            settings.save(ignore_permissions=True)
+            frappe.clear_cache(doctype="Rohit Settings")
+
     def test_get_stock_entry_link_follows_priority_order(self):
         self.assertEqual(
             get_stock_entry_link(frappe._dict(process_job_card="JC-1", sales_order="SO-1")),

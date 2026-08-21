@@ -44,7 +44,10 @@
   "email_api_key",
   "minimum_credits",
   "sb6",
-  "asp_private_key_path"
+  "asp_private_key_path",
+  "sb7",
+  "transaction_lock_bypass_role",
+  "locked_doctypes"
  ],
  "fields": [
   {
@@ -280,6 +283,26 @@
    "fieldname": "asp_private_key_path",
    "fieldtype": "Data",
    "label": "ASP Private Key Path"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "sb7",
+   "fieldtype": "Section Break",
+   "label": "Transaction View Lock"
+  },
+  {
+   "description": "Role that can still see transactions past their retention window. Administrator and System Manager always bypass the lock and never need this role.",
+   "fieldname": "transaction_lock_bypass_role",
+   "fieldtype": "Link",
+   "label": "Transaction Lock Bypass Role",
+   "options": "Role"
+  },
+  {
+   "description": "Document Type: doctype to lock (must also be wired into hooks.py has_permission/permission_query_conditions to take effect). Days to Keep: rolling retention window in days, counted from today against the doctype's transaction date. Doctype Conditions: optional single condition (field op value, e.g. \"outstanding_amount != 0\") — when it holds, the document stays visible regardless of age.",
+   "fieldname": "locked_doctypes",
+   "fieldtype": "Table",
+   "label": "Locked Doctypes",
+   "options": "Global Search DocType"
   }
  ],
  "issingle": 1,

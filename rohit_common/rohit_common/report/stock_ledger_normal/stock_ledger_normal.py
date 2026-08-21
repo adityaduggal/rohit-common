@@ -4,6 +4,9 @@
 from __future__ import unicode_literals
 import frappe
 import datetime
+from rohit_common.rohit_common.validations.transaction_lock import (
+    get_voucher_type_lock_condition,
+)
 
 
 def execute(filters=None):
@@ -174,5 +177,11 @@ def get_conditions(filters):
     if filters.get("to_date"):
         conditions += " AND sle.posting_date <= %(to_date)s"
         values["to_date"] = filters["to_date"]
+
+    lock_condition, lock_values = get_voucher_type_lock_condition(
+        "sle", "voucher_type", "posting_date", frappe.session.user
+    )
+    conditions += lock_condition
+    values.update(lock_values)
 
     return conditions, conditions_item, values

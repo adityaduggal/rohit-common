@@ -70,12 +70,43 @@ after_migrate = [
 # -----------
 # Permissions evaluated in scripted ways
 
-# permission_query_conditions = {
-#   "Event": "frappe.core.doctype.event.event.get_permission_query_conditions",
-# }
-#
+# Transaction view-lock: doctypes here get has_permission +
+# permission_query_conditions checks against Rohit Settings.locked_doctypes.
+# The doctype list here MUST stay in sync with
+# rohit_common.rohit_common.validations.transaction_lock.LOCKED_DOCTYPE_DATE_FIELDS
+# (that dict is the source of truth for which doctypes have a known date
+# field; adding a doctype to only one of the two does nothing).
+_TRANSACTION_LOCK_MODULE = (
+    "rohit_common.rohit_common.validations.transaction_lock"
+)
+permission_query_conditions = {
+    "Sales Invoice": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_sales_invoice",
+    "Purchase Invoice": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_purchase_invoice",
+    "POS Invoice": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_pos_invoice",
+    "Journal Entry": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_journal_entry",
+    "Payment Entry": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_payment_entry",
+    "GL Entry": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_gl_entry",
+    "Delivery Note": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_delivery_note",
+    "Purchase Receipt": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_purchase_receipt",
+    "Stock Entry": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_stock_entry",
+    "Quotation": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_quotation",
+    "Sales Order": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_sales_order",
+    "Purchase Order": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_purchase_order",
+}
 has_permission = {
-     "File": "rohit_common.core.file.custom_file_permissions"
+     "File": "rohit_common.core.file.custom_file_permissions",
+     "Sales Invoice": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "Purchase Invoice": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "POS Invoice": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "Journal Entry": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "Payment Entry": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "GL Entry": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "Delivery Note": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "Purchase Receipt": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "Stock Entry": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "Quotation": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "Sales Order": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "Purchase Order": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
 }
 
 # Javascripts for Standard Documents to Override Forms Script
@@ -165,7 +196,8 @@ scheduler_events = {
         "rohit_common.rohit_common.scheduled_tasks.auto_refresh_gstin_auth_code.execute"
     ],
     "daily": [
-        "rohit_common.rohit_common.scheduled_tasks.auto_update_from_erp.update_export_invoices"
+        "rohit_common.rohit_common.scheduled_tasks.auto_update_from_erp.update_export_invoices",
+        "rohit_common.rohit_common.scheduled_tasks.revoke_locked_doc_shares.execute",
     ],
     "hourly": [
         "rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files.check_correct_folders",
