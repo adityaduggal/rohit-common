@@ -59,11 +59,14 @@ def get_data(filters):
             FROM `tabFile`
             WHERE docstatus=0 AND is_folder=1
             ORDER BY lft DESC, rgt DESC""", as_dict=1)
+        # Single aggregate query for all folders (was one SUM/COUNT query per folder row).
+        folder_stats = frappe.db.sql("""SELECT folder, ROUND(((SUM(file_size))/1024/1024),2) as size,
+            COUNT(name) as nos FROM `tabFile` WHERE folder IS NOT NULL GROUP BY folder""", as_dict=1)
+        folder_stats_map = {row.folder: row for row in folder_stats}
         for row in new_data:
-            files = frappe.db.sql("""SELECT ROUND(((SUM(file_size))/1024/1024),2) as size, COUNT(name) as nos
-            FROM `tabFile` WHERE folder='%s'""" %row.name, as_dict=1)
-            row["act_size"] = files[0].size
-            row["count"] = files[0].nos
+            stats = folder_stats_map.get(row.name)
+            row["act_size"] = stats.size if stats else 0
+            row["count"] = stats.nos if stats else 0
         for row in new_data:
             data_row = [row.name, row.folder, row.count, row.act_size, row.size, row.lft, row.rgt,
             row.owner]

@@ -228,10 +228,13 @@ def update_auth_token(row_name, auth_token, failed=0, error_code=None):
             print(f"Error Code: {str(error_code)} Not in List")
         frappe.db.commit()
     else:
-        auth_access = flt(frappe.db.get_value("GST Registration Details", row_name,
-            "api_access_authorized"))
-        exist_token_times = flt(frappe.db.get_value("GST Registration Details", row_name,
-            "no_of_times_token_updated"))
+        # Combined into a single query (was two frappe.db.get_value() round trips).
+        auth_access, exist_token_times = frappe.db.get_value(
+            "GST Registration Details", row_name,
+            ["api_access_authorized", "no_of_times_token_updated"],
+        )
+        auth_access = flt(auth_access)
+        exist_token_times = flt(exist_token_times)
         if auth_access == 1:
             frappe.db.set_value("GST Registration Details", row_name, "no_of_times_token_updated",
                 exist_token_times + 1)

@@ -95,31 +95,43 @@ class GSTR2ARIGPL(Document):
 
     def update_gstr2b_for_gstin(self, row, dt, gstr2b_date):
         sup_cond = ""
+        values = {}
         if dt != "impg":
-            sup_cond += f" AND gi.party_gstin = '{row.get('ctin')}' AND g2.return_period = '{row.get('supprd')}'"
+            sup_cond = " AND gi.party_gstin = %(party_gstin)s AND g2.return_period = %(return_period)s"
+            values = {"party_gstin": row.get('ctin'), "return_period": row.get('supprd')}
         if dt == "cdnr":
             invoices = row.get("nt")
+            inv_no_field = "ntnum"
         elif dt == "impg":
             invoices = [row]
+            inv_no_field = "boenum"
         else:
             invoices = row.get("inv")
+            inv_no_field = "inum"
+
+        inv_nos = [inv.get(inv_no_field) for inv in invoices]
+        if not inv_nos:
+            return
+
+        # Single query across all invoice numbers for this row, instead of one
+        # query per invoice inside the loop below.
+        values["inv_nos"] = inv_nos
+        gstr2_rows = frappe.db.sql(f"""SELECT g2.name, gi.name as row_name, gi.idx, gi.supplier_invoice_no
+            FROM `tabGSTR2A RIGPL` g2, `tabGSTR2 Return Invoices` gi
+            WHERE gi.parent = g2.name AND gi.supplier_invoice_no IN %(inv_nos)s {sup_cond}""", values, as_dict=1)
+        rows_by_invoice_no = {}
+        for r in gstr2_rows:
+            rows_by_invoice_no.setdefault(r.supplier_invoice_no, []).append(r)
+
         for inv in invoices:
-            if dt == "cdnr":
-                inv_no = inv.get("ntnum")
-            elif dt == "impg":
-                inv_no = inv.get("boenum")
-            else:
-                inv_no = inv.get("inum")
-            query = """SELECT g2.name, gi.name as row_name, gi.idx
-            FROM `tabGSTR2A RIGPL` g2, `tabGSTR2 Return Invoices` gi 
-            WHERE gi.parent = g2.name AND gi.supplier_invoice_no = '%s' %s""" % (inv_no, sup_cond)
-            gstr2_row = frappe.db.sql(query, as_dict=1)
-            if len(gstr2_row) < 1:
+            inv_no = inv.get(inv_no_field)
+            matched = rows_by_invoice_no.get(inv_no, [])
+            if len(matched) < 1:
                 frappe.throw(f"No GSTR2 Data found for GSTIN: {row} and {dt}")
             else:
-                for row in gstr2_row:
-                    frappe.db.set_value("GSTR2 Return Invoices", row.row_name, "gstr2b_date", gstr2b_date)
-                    frappe.db.set_value("GSTR2 Return Invoices", row.row_name, "gstr2b_period", self.return_period)
+                for m in matched:
+                    frappe.db.set_value("GSTR2 Return Invoices", m.row_name, "gstr2b_date", gstr2b_date)
+                    frappe.db.set_value("GSTR2 Return Invoices", m.row_name, "gstr2b_period", self.return_period)
 
     def analyse_data(self, dont_save=0):
         self.link_docs()

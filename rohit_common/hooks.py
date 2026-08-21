@@ -10,6 +10,7 @@ app_color = "#007AFF"
 app_email = "aditya@rigpl.com"
 app_url = "https://github.com/adityaduggal/rohit_common"
 app_version = "0.0.1"
+app_license = "GPLv3"
 hide_in_installer = True
 
 # Fixtures help https://frappeframework.com/docs/v13/user/en/python-api/hooks#fixtures

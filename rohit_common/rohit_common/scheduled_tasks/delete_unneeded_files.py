@@ -10,7 +10,7 @@ import time
 import frappe
 from frappe.utils import flt
 from frappe.utils.fixtures import sync_fixtures
-from ...utils.rohit_common_utils import rebuild_tree
+from ...utils.rohit_common_utils import rebuild_tree, apply_batched_field_update
 from rohit_common.core.file import check_file_availability, delete_file_dt, check_and_move_file, correct_file_name_url
 
 sync_fixtures()
@@ -53,15 +53,28 @@ def execute():
     archived = 0
     arch_folders = frappe.db.sql("""SELECT name, lft, rgt FROM `tabFile` WHERE is_folder=1
     AND important_document_for_archive=1 AND is_home_folder=0 AND is_attachments_folder=0""", as_dict=1)
-    for folder in arch_folders:
-        print(f"{folder.name} is a Archive Folder and Hence All files and Folders Under it Would be Archived")
-        files = frappe.db.sql("""SELECT name, file_name FROM `tabFile` WHERE rgt <= %s
-        AND lft >= %s AND important_document_for_archive = 0""" % (folder.rgt, folder.lft), as_dict=1)
-        for file in files:
-            print(f"{file.name} with File Name={file.file_name} is being made Archive File")
-            fd = frappe.get_doc("File", file.name)
-            fd.important_document_for_archive = 1
-            fd.save()
+    # Single query for all descendant files across every archive folder's lft/rgt range,
+    # instead of one SELECT per archive folder (N+1). DISTINCT guards against a file being
+    # picked up twice if one archive folder is nested inside another.
+    files_to_archive = []
+    if arch_folders:
+        range_conditions = " OR ".join(
+            "(f.rgt <= %(rgt_{i})s AND f.lft >= %(lft_{i})s)".format(i=i) for i in range(len(arch_folders))
+        )
+        range_values = {}
+        for i, folder in enumerate(arch_folders):
+            range_values[f"rgt_{i}"] = folder.rgt
+            range_values[f"lft_{i}"] = folder.lft
+        files_to_archive = frappe.db.sql(
+            f"""SELECT DISTINCT f.name, f.file_name FROM `tabFile` f
+            WHERE f.important_document_for_archive = 0 AND ({range_conditions})""",
+            range_values, as_dict=1,
+        )
+    for file in files_to_archive:
+        print(f"{file.name} with File Name={file.file_name} is being made Archive File")
+        fd = frappe.get_doc("File", file.name)
+        fd.important_document_for_archive = 1
+        fd.save()
     frappe.db.commit()
     print("Checking for Files Marked to Delete")
     time.sleep(1)
@@ -89,15 +102,20 @@ def execute():
         dt_conds = ""
         if row.doctype_conditions:
             dt_conds = " AND %s" % row.doctype_conditions
-        query = """SELECT fd.name FROM `tabFile` fd, `tab%s` dt WHERE fd.attached_to_doctype = '%s' AND
-        fd.creation <= DATE_SUB(NOW(), INTERVAL %s DAY) AND dt.name = fd.attached_to_name %s""" \
-                % (row.document_type, row.document_type, row.days_to_keep, dt_conds)
-        files = frappe.db.sql(query, as_dict=1)
+        query = """SELECT fd.name FROM `tabFile` fd, `tab{doctype}` dt WHERE fd.attached_to_doctype = %(doctype)s AND
+        fd.creation <= DATE_SUB(NOW(), INTERVAL %(days)s DAY) AND dt.name = fd.attached_to_name {dt_conds}""".format(
+            doctype=row.document_type, dt_conds=dt_conds
+        )
+        files = frappe.db.sql(query, {"doctype": row.document_type, "days": row.days_to_keep}, as_dict=1)
         tot_auto_delete += len(files)
         for file in files:
             auto_delete += 1
             fd = frappe.get_doc("File", file.name)
-            doc = frappe.get_doc(row.document_type, fd.attached_to_name)
+            # NOTE: the query above already joins `tab{doctype}` on dt.name = fd.attached_to_name,
+            # so the referenced document's existence is already confirmed by the SQL. The
+            # previous `frappe.get_doc(row.document_type, fd.attached_to_name)` here re-fetched
+            # that same document, once per file, for a result that was never used — a pure N+1
+            # with no effect. Removed.
             comment = f"Removed {file.name} Due to Deletion Policy to Delete After {row.days_to_keep} Days"
             delete_file_dt(fd, comment=comment)
             if auto_delete % 500 == 0 and auto_delete > 0:
@@ -112,12 +130,28 @@ def execute():
     # Doctype where Public Files are not allowed
     print("Check for File Availability and Updating the Same")
     avail_count = 0
-    non_validated_files = frappe.db.sql("""SELECT name FROM `tabFile` WHERE file_available_on_server = 0
-    AND is_folder=0""", as_dict=1)
+    non_validated_files = frappe.db.sql("""SELECT name, attached_to_doctype, attached_to_name FROM `tabFile`
+    WHERE file_available_on_server = 0 AND is_folder=0""", as_dict=1)
     print(f"Total Non Available Files = {len(non_validated_files)}")
     time.sleep(1)
     non_avail_files = 0
     non_avail_dt = 0
+
+    # Pre-fetch existence of every referenced (attached_to_doctype, attached_to_name) in one
+    # query per doctype, instead of a frappe.db.exists() call per file inside the loop below.
+    names_by_doctype = {}
+    for file in non_validated_files:
+        if file.attached_to_doctype and file.attached_to_name:
+            names_by_doctype.setdefault(file.attached_to_doctype, set()).add(file.attached_to_name)
+    existing_refs_by_doctype = {}
+    for doctype, names in names_by_doctype.items():
+        existing_refs_by_doctype[doctype] = set(
+            frappe.get_all(doctype, filters=[["name", "in", list(names)]], pluck="name")
+        )
+
+    def ref_doc_exists(doctype, name):
+        return name in existing_refs_by_doctype.get(doctype, set())
+
     for file in non_validated_files:
         avail_count += 1
         dont_save = 0
@@ -138,7 +172,7 @@ def execute():
                         fd.file_available_on_server = 1
                         fd.is_private = 1
             if fd.attached_to_name:
-                if not frappe.db.exists(fd.attached_to_doctype, fd.attached_to_name):
+                if not ref_doc_exists(fd.attached_to_doctype, fd.attached_to_name):
                     non_avail_dt += 1
                     dont_save = 1
                     delete_file_dt(fd, ref_doc_exists=0)
@@ -152,10 +186,7 @@ def execute():
         else:
             file_exists = 0
             if fd.attached_to_doctype:
-                if not frappe.db.exists(fd.attached_to_doctype, fd.attached_to_name):
-                    file_exists = 0
-                else:
-                    file_exists = 1
+                file_exists = 1 if ref_doc_exists(fd.attached_to_doctype, fd.attached_to_name) else 0
             comment = f"File Removed Since Not Available on Server"
             delete_file_dt(fd, comment=comment, ref_doc_exists=file_exists)
         if avail_count % 500 == 0 and avail_count > 0:
@@ -183,20 +214,35 @@ def check_correct_folders():
     tr_time = time.time()
     folders = frappe.db.sql("""SELECT name, folder, file_size, lft, rgt, important_document_for_archive
         FROM `tabFile` WHERE is_folder=1 ORDER BY lft DESC, rgt DESC""", as_dict=1)
+
+    # important_document_for_archive is already selected for every folder above, so the parent's
+    # flag can be looked up from this same result set instead of a frappe.get_doc() per folder.
+    folder_archive_map = {f.name: f.important_document_for_archive for f in folders}
+
+    # Single aggregate query replaces the previous per-folder SQL query. Preserves the original
+    # DISTINCT (file_name, file_size, folder) de-duplication semantics before summing.
+    folder_size_rows = frappe.db.sql("""SELECT folder, SUM(file_size) AS total_size FROM (
+        SELECT DISTINCT file_name, file_size, folder FROM `tabFile` WHERE folder IS NOT NULL
+    ) distinct_files GROUP BY folder""", as_dict=1)
+    folder_size_map = {row.folder: (row.total_size or 0) for row in folder_size_rows}
+
+    # Collect updates in memory and write them in batched CASE-based UPDATEs
+    # below, instead of one frappe.db.set_value() call per folder.
+    archive_updates = {}
+    size_updates = {}
     for fd in folders:
         if fd.folder:
-            pfd = frappe.get_doc("File", fd.folder)
-            if pfd.important_document_for_archive == 1:
-                if fd.important_document_for_archive != 1:
-                    frappe.db.set_value("File", fd.name, "important_document_for_archive", pfd.important_document_for_archive)
-            fd_file_size = frappe.db.sql("""SELECT DISTINCT file_name, file_size, folder
-                FROM `tabFile` WHERE folder = '%s'""" % fd.name, as_dict=1)
-            fd_size = 0
-            if fd_file_size:
-                for fl in fd_file_size:
-                    fd_size += fl.file_size
+            parent_archive = folder_archive_map.get(fd.folder)
+            if parent_archive == 1 and fd.important_document_for_archive != 1:
+                archive_updates[fd.name] = parent_archive
+        # NOTE: previously this was computed only inside `if fd.folder:`, which left `fd_size`
+        # referencing a stale value from a prior iteration (or undefined on the first iteration)
+        # for root folders. Computing it unconditionally for every folder fixes that.
+        fd_size = folder_size_map.get(fd.name, 0)
         if fd_size != fd.file_size:
-            frappe.db.set_value("File", fd.name, "file_size", fd_size)
-            print(f"Updating Folder: {fd.name} with Actual File Size = {fd_file_size[0].size} old size {fd.file_size}")
+            size_updates[fd.name] = fd_size
+            print(f"Updating Folder: {fd.name} with Actual File Size = {fd_size} old size {fd.file_size}")
+    apply_batched_field_update("File", "important_document_for_archive", archive_updates)
+    apply_batched_field_update("File", "file_size", size_updates)
     print(f"Time Taken for Tree Rebuild = {int(tr_time - st_time)} seconds")
     print(f"Total Time Taken For Tree Build and File Size Checking = {int(time.time() - st_time)} seconds")

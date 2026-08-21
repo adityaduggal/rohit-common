@@ -60,8 +60,22 @@ def check_gst_rules(doc,method):
 
 
 def update_fields(doc,method):
+	# Batch-fetch customs_tariff_number for every item on the invoice in one
+	# query, instead of one frappe.get_value() call per line item.
+	item_codes = list({it.item_code for it in doc.items if it.item_code})
+	tariff_by_item = {}
+	if item_codes:
+		tariff_by_item = {
+			row.item_code: row.customs_tariff_number
+			for row in frappe.get_all(
+				"Item", filters=[["item_code", "in", item_codes]],
+				fields=["item_code", "customs_tariff_number"],
+			)
+		}
 	for it in doc.items:
-		it_gst = frappe.get_value('Item', it.item_code, 'customs_tariff_number')
+		if it.item_code not in tariff_by_item:
+			frappe.throw(f"Item Code {it.item_code} in line# {it.idx} does not exist in Item master")
+		it_gst = tariff_by_item[it.item_code]
 		if it.gst_hsn_code != it_gst:
 			it.gst_hsn_code = it_gst
 	doc.letter_head = frappe.db.get_value("Purchase Taxes and Charges Template", doc.taxes_and_charges, "letter_head")

@@ -158,9 +158,23 @@ def check_customs_tariff(doc):
     Removes HTML tags and also does not allow CTSH below 6 digit or any item which is not linked
     to a Customs Tariff
     """
+    # Batch-fetch customs_tariff_number for every item on the invoice in one
+    # query, instead of one frappe.db.get_value() call per line item.
+    item_codes = list({items.item_code for items in doc.items if items.item_code})
+    tariff_by_item = {}
+    if item_codes:
+        tariff_by_item = {
+            row.item_code: row.customs_tariff_number
+            for row in frappe.get_all(
+                "Item", filters=[["item_code", "in", item_codes]],
+                fields=["item_code", "customs_tariff_number"],
+            )
+        }
     for items in doc.items:
         items.description = remove_html(items.description)
-        custom_tariff = frappe.db.get_value("Item", items.item_code, "customs_tariff_number")
+        if items.item_code not in tariff_by_item:
+            frappe.throw(f"Item Code {items.item_code} in line# {items.idx} does not exist in Item master")
+        custom_tariff = tariff_by_item[items.item_code]
         if custom_tariff:
             if len(custom_tariff) >= 6:
                 items.gst_hsn_code = custom_tariff

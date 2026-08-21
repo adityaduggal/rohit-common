@@ -33,7 +33,11 @@ def get_unposted_invoices():
         FROM `tabGL Entry` gle WHERE gle.voucher_type = 'Sales Invoice'
         AND gle.voucher_no = si.name) ORDER BY si.creation""", as_dict=1)
     for un_si in gl_not_posted:
-        sid = frappe.get_doc("Sales Invoice", un_si)
+        # Bug fix: un_si is a _dict row (name, creation), not a document name. Passing a
+        # dict as the `name` arg makes frappe.get_doc() construct a new unsaved in-memory
+        # document instead of loading the real Sales Invoice, so sid.cancel() would operate
+        # on the wrong object. Use un_si.name to load the actual document.
+        sid = frappe.get_doc("Sales Invoice", un_si.name)
         sid.cancel()
         frappe.db.set_value("Sales Invoice", un_si.name, "docstatus", 0)
         frappe.db.set_value("Sales Invoice", un_si.name, "set_posting_time", 1)
@@ -73,10 +77,13 @@ def make_einvoice_for_docs():
     einv_date = frappe.get_value("Rohit Settings", "Rohit Settings", "einvoice_applicable_date")
     if einv_app == 1:
         for doc in doc_list:
+            # `doc` (table name) comes from the fixed doc_list above, not user input, so
+            # it's safe to interpolate directly (bind params can't parameterize identifiers
+            # anyway). `einv_date` is a value, so it's bound rather than interpolated.
             query = f"""SELECT name, posting_date FROM `tab{doc}` WHERE docstatus = 1 AND
             (irn IS NULL OR ack_no IS NULL OR ack_date IS NULL) AND
-            posting_date >= '{einv_date}' ORDER BY posting_date DESC, name DESC"""
-            einv_docs = frappe.db.sql(query, as_dict=1)
+            posting_date >= %(einv_date)s ORDER BY posting_date DESC, name DESC"""
+            einv_docs = frappe.db.sql(query, {"einv_date": einv_date}, as_dict=1)
             if einv_docs:
                 for einv in einv_docs:
                     need_einv = einv_needed(doc, einv.name)

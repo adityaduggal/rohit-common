@@ -23,10 +23,10 @@ def execute():
         IFNULL(gst_validation_date, '1900-01-01') as gst_validation_date, gstin, gst_status
     FROM `tabAddress`
     WHERE gstin IS NOT NULL AND gstin != "NA" AND disabled=0 AND country = 'India'
-    AND (validated_gstin IS NULL OR DATE_ADD(IFNULL(gst_validation_date, '1900-01-01'), INTERVAL %s DAY) < CURDATE())
-    ORDER BY gstin, name""" % auto_days
+    AND (validated_gstin IS NULL OR DATE_ADD(IFNULL(gst_validation_date, '1900-01-01'), INTERVAL %(auto_days)s DAY) < CURDATE())
+    ORDER BY gstin, name"""
 
-    add_list = frappe.db.sql(query, as_dict=1)
+    add_list = frappe.db.sql(query, {"auto_days": auto_days}, as_dict=1)
 
     for add in add_list:
         print(f"Checking Address with GSTIN {add.gstin} with Validation Date {add.gst_validation_date}")
@@ -39,13 +39,13 @@ def execute():
             if days_since_validation > auto_days:
                 # Now Validate the GSTIN
                 add_doc = frappe.get_doc("Address", add.name)
-                validate_gstin_from_portal(add_doc)
+                validate_gstin_from_portal(add_doc, auto_days=auto_days)
                 changes_made = 1
                 validate += 1
         else:
             changes_made = 1
             add_doc = frappe.get_doc("Address", add.name)
-            validate_gstin_from_portal(add_doc)
+            validate_gstin_from_portal(add_doc, auto_days=auto_days)
             validate += 1
         if changes_made == 1:
             try:

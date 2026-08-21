@@ -210,30 +210,44 @@ def validate_shipping_address(doc):
             doc.is_shipping_address = 1
 
 
+def _other_linked_addresses(doc):
+    """
+    Single query across all of doc.links (was one query per link, with only the
+    last link's results actually used afterwards due to a loop-scope bug where
+    the consuming code lived outside the loop). Returns a de-duplicated list of
+    other document names linked the same way as `doc`.
+    """
+    if not doc.links:
+        return []
+    conditions = []
+    values = {"parent": doc.name, "parenttype": doc.doctype}
+    for i, link in enumerate(doc.links):
+        conditions.append(f"(link_doctype = %(link_doctype_{i})s AND link_name = %(link_name_{i})s)")
+        values[f"link_doctype_{i}"] = link.link_doctype
+        values[f"link_name_{i}"] = link.link_name
+    rows = frappe.db.sql(f"""SELECT DISTINCT parent FROM `tabDynamic Link`
+        WHERE ({' OR '.join(conditions)})
+        AND parent != %(parent)s AND parenttype = %(parenttype)s""", values, as_list=1)
+    return [row[0] for row in rows]
+
+
 def unset_other(doc, is_address_type):
     """
     If current address is Primary then other is unset
     """
-    for link in doc.links:
-        other_add = frappe.db.sql(f"""SELECT parent FROM `tabDynamic Link`
-        WHERE link_doctype = '{link.link_doctype}' AND link_name = '{link.link_name}'
-        AND parent != '{doc.name}' AND parenttype = '{doc.doctype}'""", as_list=1)
-    for add in other_add:
-        frappe.db.set_value(doc.doctype, add[0], is_address_type, 0)
+    for add in _other_linked_addresses(doc):
+        frappe.db.set_value(doc.doctype, add, is_address_type, 0)
 
 
 def check_set(doc, is_address_type):
     """
     Returns Boolean for checking whether Primary is Set or not
     """
-    for lnk in doc.links:
-        other_add = frappe.db.sql(f"""SELECT parent FROM `tabDynamic Link`
-        WHERE link_doctype = '{lnk.link_doctype}' AND link_name = '{lnk.link_name}'
-        AND parent != '{doc.name}' AND parenttype = '{doc.doctype}'""", as_list=1)
-        chk = 0
-        for add in other_add:
-            chk = chk + flt(frappe.db.get_value(doc.doctype, add[0], is_address_type))
-    return chk
+    other_add = _other_linked_addresses(doc)
+    if not other_add:
+        return 0
+    rows = frappe.get_all(doc.doctype, filters=[["name", "in", other_add]], fields=["name", is_address_type])
+    return sum(flt(row.get(is_address_type)) for row in rows)
 
 
 def check_id(doc):
@@ -320,12 +334,18 @@ def update_fields_from_gmaps(doc, address_dict):
         remove_google_updates(doc)
 
 
-def validate_gstin_from_portal(doc):
+def validate_gstin_from_portal(doc, auto_days=None):
     """
     Validates GSTIN from GST Portal
+
+    `auto_days` lets a caller iterating many Address docs (e.g. the
+    auto_update_gstin_status scheduled task) fetch the Rohit Settings value
+    once outside the loop instead of this function re-fetching it per call.
+    Single-document callers (e.g. the Address validate hook) can omit it.
     """
-    auto_days = flt(frappe.get_value("Rohit Settings", "Rohit Settings",
-        "auto_validate_gstin_after"))
+    if auto_days is None:
+        auto_days = flt(frappe.get_value("Rohit Settings", "Rohit Settings",
+            "auto_validate_gstin_after"))
     if doc.gst_validation_date:
         days_since_validation = (date.today() - getdate(doc.gst_validation_date)).days
     else:

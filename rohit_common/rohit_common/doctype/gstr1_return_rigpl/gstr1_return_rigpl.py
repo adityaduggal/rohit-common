@@ -384,12 +384,28 @@ def match_and_update_details_from_gstin(gstin_resp, gstr1_doc, act_dict):
             # address
             frappe.msgprint(f"GSTIN: {gstin_resp.ctin} is Not Mentioned in Any Invoice so Searching by Invoice No of GST Network")
             if gstin_resp.get("inv"):
-                for inv in gstin_resp.inv:
-                    inv_no = get_base_doc_frm_docname(dt="Sales Invoice", dn=inv.get("inum"))
-                    si_from_si_no = frappe.db.sql("""SELECT * FROM `tabGSTR1 Return Invoices` WHERE parent = '%s' AND parenttype = '%s'
-                        AND parentfield = '%s' AND invoice_number = '%s' ORDER BY idx""" %
-                                     (gstr1_doc.name, gstr1_doc.doctype, act_dict.get("tbl"), inv_no), as_dict=1)
+                # Batch the local-invoice lookup into a single query, instead of one
+                # frappe.db.sql() per GST-portal invoice.
+                inv_no_map = {
+                    inv.get("inum"): get_base_doc_frm_docname(dt="Sales Invoice", dn=inv.get("inum"))
+                    for inv in gstin_resp.inv
+                }
+                inv_nos = list(set(inv_no_map.values()))
+                local_rows = frappe.db.sql("""SELECT * FROM `tabGSTR1 Return Invoices` WHERE parent = %(parent)s
+                    AND parenttype = %(parenttype)s AND parentfield = %(parentfield)s
+                    AND invoice_number IN %(inv_nos)s ORDER BY idx""", {
+                        "parent": gstr1_doc.name,
+                        "parenttype": gstr1_doc.doctype,
+                        "parentfield": act_dict.get("tbl"),
+                        "inv_nos": inv_nos,
+                    }, as_dict=1)
+                local_rows_by_invoice = {}
+                for row in local_rows:
+                    local_rows_by_invoice.setdefault(row.invoice_number, []).append(row)
 
+                for inv in gstin_resp.inv:
+                    inv_no = inv_no_map[inv.get("inum")]
+                    si_from_si_no = local_rows_by_invoice.get(inv_no, [])
                     if si_from_si_no:
                         check_invoice_integrity(gst_inv_data=inv, local_inv_data=si_from_si_no)
                     else:

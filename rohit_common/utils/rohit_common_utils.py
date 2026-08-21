@@ -155,38 +155,118 @@ def check_system_manager(user):
 
 
 def rebuild_tree(doctype, parent_field, group_field):
-    # call rebuild_node for all root nodes
-    # get all roots
+    """
+    Rebuilds nested-set lft/rgt values for every row of `doctype`.
+
+    Previously this issued one recursive SQL SELECT per group node plus one
+    UPDATE per row - O(N) queries for an N-row tree. It now fetches the whole
+    table in a single query, walks the same parent-child algorithm in memory,
+    and writes every lft/rgt update in a small number of batched multi-row
+    UPDATEs (chunked to keep individual statements a reasonable size).
+
+    Also fixes a pre-existing bug: for a root-level GROUP node, the previous
+    version discarded rebuild_group()'s return value and never advanced `lft`
+    for the next root, so multiple root-level groups ended up with
+    overlapping lft/rgt ranges. This version threads the return value through.
+    """
+    all_rows = frappe.db.sql(
+        "SELECT name, `{group_field}` AS group_flag, `{parent_field}` AS parent FROM `tab{doctype}`".format(
+            group_field=group_field, parent_field=parent_field, doctype=doctype,
+        ),
+        as_dict=1,
+    )
+    children_by_parent = {}
+    for row in all_rows:
+        children_by_parent.setdefault(row.parent or "", []).append(row)
+
+    updates = {}  # name -> (lft, rgt)
+
+    def _rebuild_group(parent, left):
+        right = left + 1
+        siblings = sorted(children_by_parent.get(parent, []), key=lambda r: r.name)
+        for row in siblings:
+            if row.group_flag != 1:
+                updates[row.name] = (right, right + 1)
+                right += 2
+        for row in siblings:
+            if row.group_flag == 1:
+                print(f"Updating Groups for {row.name}")
+                right = _rebuild_group(row.name, right)
+        updates[parent] = (left, right)
+        return right
+
     lft = 1
-    result = frappe.db.sql("SELECT name, %s, lft, rgt FROM `tab%s` WHERE `%s`='' or `%s` IS NULL "
-                           "ORDER BY name ASC" % (group_field, doctype, parent_field, parent_field), as_dict=1)
-    for r in result:
-        if r.get(group_field) == 1:
-            rebuild_group(doctype, parent_field, r.name, group_field, lft)
+    roots = sorted(children_by_parent.get("", []), key=lambda r: r.name)
+    for r in roots:
+        if r.group_flag == 1:
+            lft = _rebuild_group(r.name, lft) + 1
         else:
-            frappe.db.sql("""UPDATE `tab%s` SET lft=%s, rgt=%s WHERE name='%s'""" % (
-                doctype, lft, lft+1, r.name))
+            updates[r.name] = (lft, lft + 1)
             lft += 2
 
+    _apply_batched_lft_rgt_updates(doctype, updates)
 
-def rebuild_group(doctype, parent_field, parent, group_field, left):
-    right = left + 1
-    non_gp_query = """SELECT name, %s, lft, rgt FROM `tab%s` WHERE %s = '%s'
-    AND %s = 0""" % (group_field, doctype, parent_field, parent, group_field)
-    non_grp_results = frappe.db.sql(non_gp_query, as_dict=1)
-    for r in non_grp_results:
-        frappe.db.sql("""UPDATE `tab%s` SET lft=%s, rgt=%s WHERE name='%s'""" % (
-            doctype, right, right+1, r.name))
-        right += 2
-    grp_result = frappe.db.sql("""SELECT name, %s FROM `tab%s` WHERE %s = '%s'
-    AND %s = 1""" % (group_field, doctype, parent_field, parent, group_field), as_dict=1)
-    for r in grp_result:
-        print(f"Updating Groups for {r.name}")
-        right = rebuild_group(doctype, parent_field,
-                              r.name, group_field, right)
-    frappe.db.sql("""UPDATE `tab%s` SET lft=%s, rgt=%s WHERE name='%s'""" % (
-        doctype, left, right, parent))
-    return right
+
+def _apply_batched_lft_rgt_updates(doctype, updates, chunk_size=500):
+    """
+    Writes {name: (lft, rgt)} in batches of `chunk_size` rows per UPDATE
+    statement, using a CASE expression instead of one UPDATE per row.
+    """
+    names = list(updates.keys())
+    for i in range(0, len(names), chunk_size):
+        chunk = names[i:i + chunk_size]
+        values = {}
+        lft_whens = []
+        rgt_whens = []
+        name_placeholders = []
+        for j, name in enumerate(chunk):
+            lft, rgt = updates[name]
+            values[f"name_{j}"] = name
+            values[f"lft_{j}"] = lft
+            values[f"rgt_{j}"] = rgt
+            lft_whens.append(f"WHEN %(name_{j})s THEN %(lft_{j})s")
+            rgt_whens.append(f"WHEN %(name_{j})s THEN %(rgt_{j})s")
+            name_placeholders.append(f"%(name_{j})s")
+        query = """UPDATE `tab{doctype}` SET
+            lft = CASE name {lft_whens} END,
+            rgt = CASE name {rgt_whens} END
+            WHERE name IN ({name_list})""".format(
+            doctype=doctype,
+            lft_whens=" ".join(lft_whens),
+            rgt_whens=" ".join(rgt_whens),
+            name_list=", ".join(name_placeholders),
+        )
+        frappe.db.sql(query, values)
+
+
+def apply_batched_field_update(doctype, fieldname, updates, chunk_size=500):
+    """
+    Writes {name: value} for a single field in batches of `chunk_size` rows
+    per UPDATE statement (one CASE-based UPDATE per chunk), instead of one
+    frappe.db.set_value() call per row. `fieldname` must be a fixed, hardcoded
+    column name (interpolated into the query, not parameterized - identifiers
+    can't be bind params), never user input.
+    """
+    names = list(updates.keys())
+    for i in range(0, len(names), chunk_size):
+        chunk = names[i:i + chunk_size]
+        values = {}
+        whens = []
+        name_placeholders = []
+        for j, name in enumerate(chunk):
+            values[f"name_{j}"] = name
+            values[f"val_{j}"] = updates[name]
+            whens.append(f"WHEN %(name_{j})s THEN %(val_{j})s")
+            name_placeholders.append(f"%(name_{j})s")
+        query = """UPDATE `tab{doctype}` SET
+            `{fieldname}` = CASE name {whens} END
+            WHERE name IN ({name_list})""".format(
+            doctype=doctype,
+            fieldname=fieldname,
+            whens=" ".join(whens),
+            name_list=", ".join(name_placeholders),
+        )
+        frappe.db.sql(query, values)
 
 
 def move_file_folder(file_name, old_folder, new_folder, is_folder=0):

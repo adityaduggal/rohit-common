@@ -30,8 +30,10 @@ def validate(doc, method):
 
 
 def validate_duplicate(user, dt, dn, ex_name):
-    existing = frappe.db.sql("""SELECT name FROM `tabDocShare` WHERE user='%s' AND share_doctype='%s'
-        AND share_name='%s' AND name != '%s' """ % (user, dt, dn, ex_name), as_dict=1)
+    existing = frappe.db.sql("""SELECT name FROM `tabDocShare` WHERE user=%(user)s AND share_doctype=%(dt)s
+        AND share_name=%(dn)s AND name != %(ex_name)s""", {
+            "user": user, "dt": dt, "dn": dn, "ex_name": ex_name,
+        }, as_dict=1)
     if existing:
         frappe.throw(f"There are {len(existing)} similar DocShares. Need to Delete them Before Proceeding")
 
@@ -66,7 +68,9 @@ def get_file_tree(share_doctype, share_name):
         file_dt = frappe.get_value("File", share_name, fieldname=["is_folder", "lft", "rgt", "folder", "name"],as_dict=1)
         if file_dt and file_dt.is_folder == 1:
             doc_childs = frappe.db.sql("""SELECT name, is_folder, lft, rgt, folder FROM `tabFile`
-                WHERE lft > %s AND rgt < %s""" % (file_dt.lft, file_dt.rgt), as_dict=1)
+                WHERE lft > %(lft)s AND rgt < %(rgt)s""", {
+                    "lft": file_dt.lft, "rgt": file_dt.rgt,
+                }, as_dict=1)
     return doc_childs
 
 
