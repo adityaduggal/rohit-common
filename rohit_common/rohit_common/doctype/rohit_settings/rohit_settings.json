@@ -42,7 +42,9 @@
   "email_stale_days",
   "cb5",
   "email_api_key",
-  "minimum_credits"
+  "minimum_credits",
+  "sb6",
+  "asp_private_key_path"
  ],
  "fields": [
   {
@@ -266,6 +268,18 @@
    "fieldname": "email_stale_days",
    "fieldtype": "Int",
    "label": "Email Stale Days"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "sb6",
+   "fieldtype": "Section Break",
+   "label": "TaxPro GSP Public API Auth"
+  },
+  {
+   "description": "Filesystem path to the PEM private key registered with TaxPro's GSP CRM for the Public API (Search Taxpayer / Track Return) GetKey auth. Not the key content itself — the key file must exist on the server, outside version control, readable only by the bench user. See docs/taxpro-asp-cert-setup.md.",
+   "fieldname": "asp_private_key_path",
+   "fieldtype": "Data",
+   "label": "ASP Private Key Path"
   }
  ],
  "issingle": 1,
