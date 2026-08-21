@@ -74,7 +74,7 @@ def get_data(filters):
     else:
         if filters.get("is_folder") == 1:
             data = frappe.db.sql("""SELECT name, file_name, folder, ROUND(file_size/1024/1024,2), lft, rgt, (rgt - lft),
-                is_home_folder, is_attachments_folder
+                is_home_folder, is_attachments_folder, owner
                 FROM `tabFile` WHERE docstatus = 0 {0} ORDER BY lft, rgt""".format(conditions), values, as_list=1)
         else:
             query = """SELECT name, IFNULL(file_name, "NO NAME") as file_name, IFNULL(attached_to_doctype, "NO DOCTYPE") as atd,
