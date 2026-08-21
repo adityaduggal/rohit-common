@@ -122,11 +122,12 @@ def get_public_api_base_url(sandbox):
 def _fetch_new_session(rset):
     aspid = rset.tax_pro_asp_id
     asp_password = rset.tax_pro_password
-    private_key_path = rset.asp_private_key_path
+    private_key_path = getattr(rset, "asp_private_key_path", None)
     if not private_key_path:
         frappe.throw(
-            "Rohit Settings.asp_private_key_path is not configured — "
-            "see docs/taxpro-asp-cert-setup.md (issue #6)"
+            "Rohit Settings.asp_private_key_path is not configured or not yet "
+            "synced to this site — run `bench --site <sitename> migrate`, then "
+            "set the field. See docs/taxpro-asp-cert-setup.md (issue #6)"
         )
 
     timestamp = get_getkey_timestamp()
