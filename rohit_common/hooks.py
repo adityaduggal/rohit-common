@@ -52,6 +52,14 @@ before_migrate = [
     "rohit_common.before_migrate_patches.execute"
 ]
 
+# Re-applies restrict_to_domain on the Loan Management/Quality Management
+# workspaces after every migrate, since bench migrate re-syncs erpnext's
+# standard workspace fixtures and would otherwise silently reset it back to
+# None. See rohit_common/utils/workspace_hide.py.
+after_migrate = [
+    "rohit_common.utils.workspace_hide.reapply_hidden_workspaces"
+]
+
 # Desk Notifications
 # ------------------
 # See frappe.core.notifications.get_notification_config
