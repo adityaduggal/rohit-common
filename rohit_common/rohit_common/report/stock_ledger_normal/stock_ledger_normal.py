@@ -16,7 +16,7 @@ def execute(filters=None):
 
 
 def get_columns():
-    return [ "Date:Date:80", "Time:Time:80", "Item:Link/Item:130", "Description::350", "Qty:Float:60",
+    return [ "Date:Date:100", "Time:Time:80", "Item:Link/Item:130", "Description::350", "Qty:Float:60",
              "Balance:Float:90", "Warehouse:Link/Warehouse:120",
             {
                 "label": "Voucher No",
