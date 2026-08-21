@@ -23,7 +23,7 @@ def get_columns(filters):
         if filters.get("is_folder") == 1:
             return [
                 "ID:Link/File:450", "File Name::200", "Parent Folder:Link/File:350", "Size(MB):Float:100",
-                "Left:Int:80", "Right:Int:80", "Files:Int:80","Is Home:Int:40", "Is Attachment::40"
+                "Left:Int:80", "Right:Int:80", "Files:Int:80","Is Home:Int:40", "Is Attachment::40",
                 "Owner::80"
             ]
         else:
@@ -48,11 +48,11 @@ def get_columns(filters):
 
 def get_data(filters):
     data = []
-    conditions, cond_summary = get_conditions(filters)
+    conditions, cond_summary, values = get_conditions(filters)
     if filters.get("summary_dt") == 1:
         data = frappe.db.sql("""SELECT IFNULL(attached_to_doctype, "NO DOCTYPE"), COUNT(name) as no_of_files,
-        ROUND(((SUM(file_size))/1024/1024),2) as size FROM `tabFile` WHERE docstatus=0 AND is_folder=0 %s
-        GROUP BY attached_to_doctype ORDER BY size DESC, no_of_files DESC """ % cond_summary, as_list=1)
+        ROUND(((SUM(file_size))/1024/1024),2) as size FROM `tabFile` WHERE docstatus=0 AND is_folder=0 {0}
+        GROUP BY attached_to_doctype ORDER BY size DESC, no_of_files DESC """.format(cond_summary), values, as_list=1)
     elif filters.get("summary_fol") == 1:
         new_data = frappe.db.sql("""SELECT name, folder, ROUND(file_size/1024/1024, 2) as size, lft, rgt,
             owner
@@ -75,14 +75,14 @@ def get_data(filters):
         if filters.get("is_folder") == 1:
             data = frappe.db.sql("""SELECT name, file_name, folder, ROUND(file_size/1024/1024,2), lft, rgt, (rgt - lft),
                 is_home_folder, is_attachments_folder
-                FROM `tabFile` WHERE docstatus = 0 %s ORDER BY lft, rgt""" % (conditions), as_list=1)
+                FROM `tabFile` WHERE docstatus = 0 {0} ORDER BY lft, rgt""".format(conditions), values, as_list=1)
         else:
             query = """SELECT name, IFNULL(file_name, "NO NAME") as file_name, IFNULL(attached_to_doctype, "NO DOCTYPE") as atd,
                 IFNULL(attached_to_name,"NO DOCNAME") as atn, file_available_on_server,
                 ROUND(file_size/1024,2) as size, lft, rgt, IFNULL(folder, "NO FOLDER") as folder, is_private,
                 important_document_for_archive, mark_for_deletion, owner, creation, file_url
-                FROM `tabFile` WHERE docstatus=0 %s ORDER BY creation""" % (conditions)
-            fd_data = frappe.db.sql(query, as_dict=1)
+                FROM `tabFile` WHERE docstatus=0 {0} ORDER BY creation""".format(conditions)
+            fd_data = frappe.db.sql(query, values, as_dict=1)
             for d in fd_data:
                 file_download_name = """<a href="%s" target="_blank">%s</a>""" % (d.file_url, d.file_name)
                 file_download_url = """<a href="%s" target="_blank">%s</a>""" % (d.file_url, d.file_url)
@@ -95,6 +95,8 @@ def get_data(filters):
 def get_conditions(filters):
     conditions = ""
     cond_summary = ""
+    values = {}
+
     if filters.get("is_folder") == 1:
         conditions += " AND is_folder=1"
     else:
@@ -110,7 +112,8 @@ def get_conditions(filters):
         pass
 
     if filters.get("dt_types") != "None" and filters.get("doctype"):
-        conditions += " AND attached_to_doctype = '%s'" % (filters.get("doctype"))
+        conditions += " AND attached_to_doctype = %(doctype)s"
+        values["doctype"] = filters.get("doctype")
     elif filters.get("dt_types") == "None" and filters.get("doctype"):
         frappe.throw("None Doctype Selected and hence Cannot Select a Specific Doctype")
 
@@ -119,9 +122,9 @@ def get_conditions(filters):
 
     if filters.get("folder"):
         folder_details = get_folder_details(filters.get("folder"))
-        lft = folder_details[0].lft + 1
-        rgt = folder_details[0].rgt - 1
-        conditions += " AND lft >= %s AND rgt <= %s" % (lft, rgt)
+        conditions += " AND lft >= %(lft)s AND rgt <= %(rgt)s"
+        values["lft"] = folder_details[0].lft + 1
+        values["rgt"] = folder_details[0].rgt - 1
 
     if filters.get("no_parent") == 1:
         conditions += " AND folder IS NULL"
@@ -141,4 +144,4 @@ def get_conditions(filters):
         cond_summary += " AND important_document_for_archive = 1"
         conditions += " AND important_document_for_archive = 1"
 
-    return conditions, cond_summary
+    return conditions, cond_summary, values
