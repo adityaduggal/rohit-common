@@ -68,3 +68,68 @@ lower-risk internal batch jobs and validation hooks.
 **Depends on:** Revisit once the v14 / india-compliance migration decision
 unpauses - if the module is being replaced soon, this becomes moot; if the
 migration stays paused indefinitely, this should be picked up on its own.
+
+---
+
+## General Ledger report: opening balance shown for closed-FY zero-balance rows
+
+**What:** The General Ledger report shows an opening Dr/Cr balance for
+accounts even when the account's balance is zero going into a closed prior
+FY - specifically expense accounts, which should never carry an opening
+balance across a year-end close (they're P&L accounts, closed to zero every
+FY). Party-wise rows have a related issue: they should show only the net
+value, not separate opening Dr/Cr, once a party's FY is closed.
+
+**Why deferred:** This needs custom report logic (a real change to how the
+report computes/displays opening balances per account-type and per-party),
+not a config tweak - explicitly held until version-16, where this app's
+report layer gets deliberate custom coding rather than following ERPNext
+core's General Ledger report shape as-is. Raised alongside the 2026-08
+transaction-view-lock work (see `docs/designs/transaction-view-lock.md`),
+where General Ledger/Trial Balance report changes were already found to be
+risky to get right on the first pass (a role-restriction change there was
+implemented and reverted during that same review - see that doc's "Report-
+leak coverage" section for what went wrong).
+
+**Pros:** Fixes a real correctness/readability issue - expense accounts
+showing a nonzero-looking opening balance for a period that's actually
+closed is confusing and can be misread as a data problem when it isn't one.
+
+**Cons:** Report logic in this app has already burned effort once this cycle
+(the reverted GL/Trial Balance role restriction) - rushing a second custom
+change to the same reports without full design-and-review risks a repeat.
+Waiting for v16's dedicated custom-report pass avoids that.
+
+**Effort:** M (human ~1 day / CC ~1-2 hrs, once scoped)
+**Priority:** P3
+**Depends on:** version-16 custom report work. Do not attempt as a quick fix
+on version-13/14/15 - explicitly held.
+
+---
+
+## e-Way Bill generation trigger rules
+
+**What:** Scope what triggers e-Way Bill generation for a Sales Invoice -
+value threshold, movement-of-goods conditions, and any exemptions - as its
+own design pass, separate from the ASP/GSP migration.
+
+**Why:** Raised during `/plan-eng-review` of the WhiteBooks.in ASP migration
+(see `docs/designs/gst-asp-migration-whitebooks.md`). e-Way Bill code exists
+in `eway_bill_api.py` but has never been used in production - the migration
+covers the auth/plumbing swap to WhiteBooks for that module, but the actual
+business rules for *when* to generate an e-way bill were never designed and
+don't belong bundled into a vendor-migration doc.
+
+**Pros:** Keeps the ASP migration design focused on its actual scope
+(auth/plumbing, not new business logic). e-Way Bill still gets a proper
+design pass - premise challenge, alternatives, edge cases - instead of
+trigger rules getting improvised during implementation.
+
+**Cons:** Adds one more office-hours/plan-eng-review cycle before e-way bill
+can actually go live, on top of the migration itself.
+
+**Effort:** S-M (human ~half day / CC ~30-45 min, once scoped)
+**Priority:** P2
+**Depends on:** The ASP migration's provider-swap half (Approach B layer)
+landing first - e-way bill's auth still needs migrating to WhiteBooks
+regardless of what triggers generation.
