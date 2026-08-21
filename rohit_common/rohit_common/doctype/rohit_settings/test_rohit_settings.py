@@ -31,6 +31,19 @@ class TestRohitSettings(unittest.TestCase):
         self.settings.save(ignore_permissions=True)
         self.assertEqual(len(self.settings.locked_doctypes), 1)
 
+    def test_and_chained_lock_condition_saves(self):
+        self.settings.set("locked_doctypes", [])
+        self.settings.append(
+            "locked_doctypes",
+            {
+                "document_type": "Sales Invoice",
+                "days_to_keep": 700,
+                "doctype_conditions": "outstanding_amount != 0 AND docstatus = 1",
+            },
+        )
+        self.settings.save(ignore_permissions=True)
+        self.assertEqual(len(self.settings.locked_doctypes), 1)
+
     def test_missing_document_type_throws(self):
         self.settings.set("locked_doctypes", [])
         self.settings.append("locked_doctypes", {"days_to_keep": 30})

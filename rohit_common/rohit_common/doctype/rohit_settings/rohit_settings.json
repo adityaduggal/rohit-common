@@ -298,7 +298,7 @@
    "options": "Role"
   },
   {
-   "description": "Document Type: doctype to lock (must also be wired into hooks.py has_permission/permission_query_conditions to take effect). Days to Keep: rolling retention window in days, counted from today against the doctype's transaction date. Doctype Conditions: optional single condition (field op value, e.g. \"outstanding_amount != 0\") — when it holds, the document stays visible regardless of age.",
+   "description": "Document Type: doctype to lock (must also be wired into hooks.py has_permission/permission_query_conditions to take effect). Days to Keep: rolling retention window in days, counted from today against the doctype's transaction date. Doctype Conditions: optional condition, one or more \"field op value\" comparisons joined by AND (e.g. \"outstanding_amount != 0 AND docstatus = 1\") — when all of them hold, the document stays visible regardless of age.",
    "fieldname": "locked_doctypes",
    "fieldtype": "Table",
    "label": "Locked Doctypes",

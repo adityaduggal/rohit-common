@@ -39,7 +39,7 @@ class RohitSettings(Document):
         field/operator/value comparison rather than accepted as free-form SQL.
         """
         from rohit_common.rohit_common.validations.transaction_lock import (
-            parse_condition,
+            parse_conditions,
         )
 
         for d in self.locked_doctypes:
@@ -49,11 +49,11 @@ class RohitSettings(Document):
                 frappe.throw(
                     f"Days to Keep must be greater than 0 for {d.document_type} in Locked Doctypes"
                 )
-            if d.doctype_conditions and not parse_condition(d.doctype_conditions):
+            if d.doctype_conditions and not parse_conditions(d.doctype_conditions):
                 frappe.throw(
-                    f"Doctype Conditions for {d.document_type} must be a single "
-                    f"'field operator value' comparison (operators: = != > < is), "
-                    f"e.g. \"outstanding_amount != 0\". Got: {d.doctype_conditions}"
+                    f"Doctype Conditions for {d.document_type} must be one or more "
+                    f"'field operator value' comparisons joined by AND (operators: = != > < is), "
+                    f"e.g. \"outstanding_amount != 0 AND docstatus = 1\". Got: {d.doctype_conditions}"
                 )
 
     def sort_single_field_child(self, table_name, field_name):

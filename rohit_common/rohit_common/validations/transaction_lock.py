@@ -74,6 +74,43 @@ def parse_condition(condition):
     return field, op, value
 
 
+# Splits on a literal " AND " (case-insensitive) between clauses. Each
+# resulting clause is still parsed by the single-condition grammar above, so
+# a clause containing "OR" (or a malformed clause) still fails parsing the
+# same way it always did — this only adds the ability to chain several
+# single-comparison clauses together, not general boolean expressions.
+_AND_SPLIT_RE = re.compile(r"\s+AND\s+", re.IGNORECASE)
+
+
+def parse_conditions(condition):
+    """
+    Parse a "field op value AND field op value ..." string into a list of
+    (field, op, value) tuples, one per AND-joined clause. Returns None if
+    the string is empty or any clause fails the single-condition grammar
+    (including a clause that itself contains OR, which parse_condition
+    already rejects).
+    """
+    if not condition:
+        return None
+    parsed = []
+    for clause in _AND_SPLIT_RE.split(condition.strip()):
+        result = parse_condition(clause)
+        if not result:
+            return None
+        parsed.append(result)
+    return parsed
+
+
+def conditions_hold(doc, parsed_conditions):
+    """True only if every AND-joined clause holds (see parse_conditions)."""
+    return all(condition_holds(doc, *clause) for clause in parsed_conditions)
+
+
+def conditions_sql(doctype, parsed_conditions):
+    """SQL fragment ANDing together every clause from parse_conditions."""
+    return " AND ".join(condition_sql(doctype, *clause) for clause in parsed_conditions)
+
+
 def _coerce_value(value):
     v = value.strip()
     if v.lower() in ("none", "null"):
@@ -169,8 +206,8 @@ def is_locked(doc):
     if getdate(doc_date) > getdate(cutoff):
         return False
     if row.doctype_conditions:
-        parsed = parse_condition(row.doctype_conditions)
-        if parsed and condition_holds(doc, *parsed):
+        parsed = parse_conditions(row.doctype_conditions)
+        if parsed and conditions_hold(doc, parsed):
             return False
     return True
 
@@ -217,9 +254,9 @@ def _permission_query_condition(doctype, user):
     cutoff = add_days(nowdate(), -int(row.days_to_keep))
     condition = f"(`tab{doctype}`.`{date_field}` > {frappe.db.escape(cutoff)}"
     if row.doctype_conditions:
-        parsed = parse_condition(row.doctype_conditions)
+        parsed = parse_conditions(row.doctype_conditions)
         if parsed:
-            condition += f" OR {condition_sql(doctype, *parsed)}"
+            condition += f" OR ({conditions_sql(doctype, parsed)})"
     condition += ")"
     return condition
 

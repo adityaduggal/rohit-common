@@ -12,12 +12,15 @@ from rohit_common.rohit_common.validations.transaction_lock import (
     LOCKED_DOCTYPE_DATE_FIELDS,
     condition_holds,
     condition_sql,
+    conditions_hold,
+    conditions_sql,
     get_lock_row,
     has_bypass_role,
     has_permission,
     is_admin_exempt,
     is_locked,
     parse_condition,
+    parse_conditions,
 )
 
 TEST_ROLE = "Test Transaction Lock Bypass Role"
@@ -49,6 +52,55 @@ class TestParseCondition(unittest.TestCase):
         self.assertEqual(parse_condition("docstatus is null"), ("docstatus", "is", "null"))
         self.assertIsNone(parse_condition("status is 'Draft'"))
         self.assertIsNone(parse_condition("docstatus is 1"))
+
+
+class TestParseConditions(unittest.TestCase):
+    """AND-chained conditions — parse_conditions/conditions_hold/conditions_sql."""
+
+    def test_single_clause_still_works(self):
+        self.assertEqual(
+            parse_conditions("outstanding_amount != 0"),
+            [("outstanding_amount", "!=", "0")],
+        )
+
+    def test_two_clauses_joined_by_and(self):
+        self.assertEqual(
+            parse_conditions("outstanding_amount != 0 AND docstatus = 1"),
+            [("outstanding_amount", "!=", "0"), ("docstatus", "=", "1")],
+        )
+
+    def test_and_is_case_insensitive(self):
+        self.assertEqual(
+            parse_conditions("outstanding_amount != 0 and docstatus = 1"),
+            [("outstanding_amount", "!=", "0"), ("docstatus", "=", "1")],
+        )
+
+    def test_invalid_clause_fails_whole_chain(self):
+        self.assertIsNone(parse_conditions("outstanding_amount != 0 AND docstatus"))
+        self.assertIsNone(parse_conditions(""))
+        self.assertIsNone(parse_conditions(None))
+
+    def test_or_within_a_clause_still_rejected(self):
+        self.assertIsNone(
+            parse_conditions("outstanding_amount != 0 OR status = 'Draft'")
+        )
+
+    def test_conditions_hold_requires_all_clauses(self):
+        parsed = parse_conditions("outstanding_amount != 0 AND docstatus = 1")
+        doc = frappe._dict({"outstanding_amount": 500, "docstatus": 1})
+        self.assertTrue(conditions_hold(doc, parsed))
+        doc = frappe._dict({"outstanding_amount": 0, "docstatus": 1})
+        self.assertFalse(conditions_hold(doc, parsed))
+        doc = frappe._dict({"outstanding_amount": 500, "docstatus": 0})
+        self.assertFalse(conditions_hold(doc, parsed))
+
+    def test_conditions_sql_ands_fragments(self):
+        parsed = parse_conditions("outstanding_amount != 0 AND docstatus = 1")
+        sql = conditions_sql("Sales Invoice", parsed)
+        self.assertEqual(
+            sql,
+            "`tabSales Invoice`.`outstanding_amount` != '0' AND `tabSales Invoice`.`docstatus` = '1'",
+        )
 
 
 class TestConditionHolds(unittest.TestCase):
