@@ -34,11 +34,15 @@ frappe.ui.form.on("Address", {
      * Fires when the "Country" field changes.
      * Clears fields whose values are country-specific (state, GSTIN/GST
      * fields, TIN/excise numbers, coordinates, Google location code) since
-     * they no longer apply once the country changes. Then looks up the
-     * newly selected country's "known_states" flag (Country doctype) so the
-     * "State RIGPL" field can be marked mandatory only for countries that
-     * maintain a known list of states (mirrors the server-side check in
-     * validations/address.py::country_validation).
+     * they no longer apply once the country changes.
+     *
+     * Note: the "known_states" checkbox is not set here — it is declared on
+     * the Address doctype with fetch_from "country.known_states", so the
+     * framework fetches it from the Country doc automatically whenever this
+     * field changes. "State RIGPL" itself is shown/hidden via its
+     * depends_on ("eval: doc.known_states === 1") and its mandatory-ness for
+     * such countries is enforced server-side in
+     * validations/address.py::country_validation.
      */
     country: function (frm) {
         var reset_flds = ["state", "state_rigpl", "gstin", "gst_state", "gst_state_number", "tin_no",
@@ -49,13 +53,6 @@ frappe.ui.form.on("Address", {
         }
         frm.refresh_fields();
 
-        if (frm.doc.country) {
-            frappe.db.get_value("Country", frm.doc.country, "known_states", function (r) {
-                var known_states = r && cint(r.known_states) === 1;
-                frm.set_df_property("state_rigpl", "reqd", known_states);
-                frm.refresh_field("state_rigpl");
-            });
-        }
     },
     /**
      * Fires when "State RIGPL" changes.
