@@ -1,3 +1,5 @@
 phonenumbers==8.12.40
 cryptography>=3.4.8
 pycryptodome>=3.15
+pyzbar>=0.1.9
+Pillow>=9.0

@@ -7,6 +7,7 @@ import requests
 from datetime import datetime, timedelta
 from frappe.utils import get_datetime, getdate
 from frappe.utils.file_manager import save_file
+from . import whitebooks_provider
 from .common import get_base_url, get_aspid_pass, get_default_gstin
 from ..validations.google_maps import get_distance_matrix, get_approx_dist_frm_matrix
 TIMEOUT=5
@@ -667,17 +668,107 @@ def get_eway_url(base_url, sbox):
 
 def get_eway_pass(sbox=0):
     """
-    Returns the E-Invoices user ID and password
+    Returns the E-Invoices user ID and password.
+
+    Sandbox previously returned a hardcoded test credential here (a secret
+    committed to source) instead of reading configuration — removed
+    2026-08-22. There is no dedicated sandbox eway_bill_id/password field on
+    Rohit Settings, so sandbox mode now fails loud instead of silently using
+    a stale hardcoded value or the production credential against a sandbox
+    endpoint. This Charteredinfo-specific function is scheduled for deletion
+    at T5's actual cutover (docs/designs/gst-asp-migration-whitebooks.md)
+    once the WhiteBooks e-way bill path is sandbox-verified — not worth
+    adding new config surface for code on its way out.
     """
     rset = frappe.get_doc("Rohit Settings", "Rohit Settings")
-    if sbox == 0:
-        eway_id = rset.eway_bill_id
-        eway_pass = rset.eway_bill_password
-    else:
-        eway_id = "rohit_sand_taxpro"
-        eway_pass = "ASJ9Ar3@@C"
+    if sbox != 0:
+        frappe.throw(
+            "No sandbox eway_bill_id/password is configured on Rohit Settings — "
+            "the previous hardcoded sandbox credential was removed as a committed "
+            "secret. This function is being replaced by the WhiteBooks e-way bill "
+            "path; if sandbox testing of the Charteredinfo path is still needed, "
+            "configure dedicated sandbox fields rather than reintroducing a "
+            "hardcoded value."
+        )
+    return rset.eway_bill_id, rset.eway_bill_password
 
-    return eway_id, eway_pass
+
+# ---------------------------------------------------------------------------
+# WhiteBooks.in equivalents (T5, docs/designs/gst-asp-migration-whitebooks.md)
+#
+# PLUMBING ONLY, per Premise 1: e-Way Bill business rules (what triggers
+# generation, vehicle/transporter assembly) are explicitly deferred to a
+# separate scoping doc — see TODOS.md "e-Way Bill generation trigger rules".
+# These functions are the auth/HTTP layer only, mirroring the payload shapes
+# the existing (also-unused-in-production) Charteredinfo functions above
+# assemble — NOT wired into any live call path, since e-way bill has no
+# production call sites to swap yet.
+#
+# Endpoint paths below ARE the ones WhiteBooks' own e-Way Bill API docs
+# advertise (confirmed via WebSearch, 2026-08-22: "POST /generate-ewb,
+# POST /bulk-generate, PUT /update-part-b, PUT /extend, POST /cancel") —
+# more concrete than the guessed paths in einv.py/gst_public_api.py, but
+# still UNVERIFIED against a real sandbox response/request shape. The
+# request body shape below is NOT confirmed — WhiteBooks' e-way bill JSON
+# schema was not in the pages fetched during that search. Confirm both
+# against WhiteBooks' actual docs/sandbox before trusting this in
+# production, per The Assignment.
+# ---------------------------------------------------------------------------
+
+
+def generate_ewb_whitebooks(ewb_json):
+    """WhiteBooks.in equivalent of create_ewb_from_json(). ewb_json is
+    whatever payload-assembly produces once business rules are designed —
+    this function only owns the HTTP/auth layer, not payload construction."""
+    def _call():
+        return requests.post(
+            url=whitebooks_provider.get_base_url(whitebooks_provider.EWAY) + "/generate-ewb",
+            headers=whitebooks_provider.get_headers(whitebooks_provider.EWAY),
+            json=ewb_json,
+            timeout=TIMEOUT,
+        )
+
+    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EWAY)
+    response.raise_for_status()
+    return response.json()
+
+
+def cancel_ewb_whitebooks(ewb_no, reason=None):
+    """WhiteBooks.in equivalent of cancel_ewb()."""
+    body = {"ewbNo": ewb_no}
+    if reason:
+        body["reason"] = reason
+
+    def _call():
+        return requests.post(
+            url=whitebooks_provider.get_base_url(whitebooks_provider.EWAY) + "/cancel",
+            headers=whitebooks_provider.get_headers(whitebooks_provider.EWAY),
+            json=body,
+            timeout=TIMEOUT,
+        )
+
+    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EWAY)
+    response.raise_for_status()
+    return response.json()
+
+
+def update_part_b_whitebooks(ewb_no, vehicle_details):
+    """WhiteBooks.in equivalent of update_partb_ewb(). vehicle_details is
+    whatever payload-assembly produces once business rules are designed."""
+    body = dict(vehicle_details)
+    body["ewbNo"] = ewb_no
+
+    def _call():
+        return requests.put(
+            url=whitebooks_provider.get_base_url(whitebooks_provider.EWAY) + "/update-part-b",
+            headers=whitebooks_provider.get_headers(whitebooks_provider.EWAY),
+            json=body,
+            timeout=TIMEOUT,
+        )
+
+    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EWAY)
+    response.raise_for_status()
+    return response.json()
 
 
 def get_eway_api(api, action=None):

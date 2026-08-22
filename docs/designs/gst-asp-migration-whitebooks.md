@@ -38,10 +38,16 @@ field plus a backfill patch for historical invoices.
   being fixed, per prior decision to abandon TaxPro entirely).
 - **e-Invoice** (`einv.py`): ASP-ID+password auth (`Rohit Settings.tax_pro_asp_id`
   / `.tax_pro_password`), base URL from `Rohit Settings.api_link`. Generates
-  IRN, deliberately **aggregates line items sharing the same HSN code before
-  submission** to avoid leaking item-level detail into the public IRN/QR
-  record — this logic lives inside the payload builders and is untouched by
-  this migration. Highest-priority API family: this is live and blocking
+  IRN. `get_einv_item_details()` sends one row per line item (full itemwise
+  qty/rate/amount, not aggregated) but **substitutes the item's real
+  description with the generic HSN code description** (`hsn_doc.description`
+  instead of `row.description`) to avoid leaking specific product identity
+  into the public IRN/QR record — this logic lives inside the payload
+  builders and is untouched by this migration. **Corrected during T3
+  implementation**: earlier drafts of this doc described this as "HSN
+  aggregation" (combining line items) — that was wrong; verified by reading
+  the actual loop in `get_einv_item_details()`, which appends one entry per
+  `dtd.items` row. Highest-priority API family: this is live and blocking
   invoice submission today.
 - **e-Way Bill** (`eway_bill_api.py`): same auth scheme as e-Invoice. Code
   exists but is **not currently used in production** — this migration is
@@ -58,36 +64,58 @@ field plus a backfill patch for historical invoices.
    Priority order: e-Invoice (live, blocking) > Public GST API (purchase/
    return data) > e-Way Bill (new implementation, lower urgency but in
    scope). — Agreed.
-2. **One shared WhiteBooks OAuth2 client module** (client_id/secret, token
-   cache/refresh) serves all three API families, replacing both
-   `gsp_session.py`'s cert flow and `einv.py`/`eway_bill_api.py`'s ASP-ID+
-   password headers. **Documented, not yet verified**: WhiteBooks' public
-   docs describe all three families using the same OAuth2 bearer-token
-   mechanism, but this hasn't been tested against a live account — that's
-   exactly what The Assignment's sandbox handshake test is for. Treat the
-   architecture as doc-grounded, not proven, until that test passes.
-   — Agreed. **Accepted trade-off
-   (plan-eng-review finding)**: today, a Public GST API session issue and an
-   e-Invoice auth issue are independent failures. Consolidating onto one
-   shared client means a bug or outage in that module can take down all
-   three families simultaneously, where before they failed independently.
-   This is accepted in exchange for simplicity — the mitigation is the
-   Error Handling section's fail-loud + tagged logging (`whitebooks-defect`
-   vs `whitebooks-outage`), which makes a shared-client outage immediately
-   visible rather than silently degrading just one family.
+2. **One shared WhiteBooks OAuth2 client module** (`whitebooks_provider.py`)
+   implements the auth mechanics (client_credentials grant, token
+   cache/refresh, single-retry-on-401) for all three API families, replacing
+   both `gsp_session.py`'s cert flow and `einv.py`/`eway_bill_api.py`'s
+   ASP-ID+password headers. **Revised during T3 implementation
+   (2026-08-22)**: WhiteBooks issues a SEPARATE client_id/client_secret pair
+   per API product (e-Invoice, Public GST, e-Way Bill), each with its own
+   sandbox/production pair — not one shared credential pair across all
+   three as this premise originally assumed. The module (and its token
+   cache) is shared code, but auth STATE is per-family: `get_token(api_name)`,
+   `get_headers(api_name)`, and `refresh_session(api_name)` all take the
+   family explicitly, and each family gets its own cached token under a
+   family-scoped cache key. The shared `Rohit Settings.sandbox_mode`
+   checkbox still selects environment for all three, reused rather than
+   duplicated per family — that part of the original premise holds.
+   **Documented, not yet verified**: WhiteBooks' public docs describe
+   OAuth2 bearer-token auth as the mechanism for all three families, but
+   the token endpoint's exact path and whether it's shared at the host
+   level or scoped per family have not been tested against a live account
+   — that's exactly what The Assignment's sandbox handshake test is for.
+   — Agreed. **Trade-off updated (plan-eng-review finding, since narrowed
+   by the per-family-credentials revision)**: the original concern — a
+   credential/session outage taking down all three families at once — no
+   longer applies, since each family now has independent credentials and a
+   separately-cached token; a bad client_secret for one family doesn't
+   affect the others. What remains: a *code* bug in the shared
+   `whitebooks_provider.py` module (not a credential/session issue) can
+   still affect all three families simultaneously, since they run the same
+   code path. Mitigation unchanged — the Error Handling section's
+   fail-loud + tagged logging (`whitebooks-defect` vs `whitebooks-outage`)
+   makes that visible immediately rather than silently degrading one
+   family.
 3. **Payload-building logic stays as-is** (`gen_einv_json`, `get_eway_details`,
-   the HSN-aggregation step, etc.) — only the HTTP/auth/base-URL plumbing
-   around it changes, since the JSON shape follows the government's IRP
-   schema, not the vendor. **Documented, not yet verified**: WhiteBooks and
-   `india-compliance` both describe targeting the same IRP schema (Client
-   ID/Secret credentials against the same government API surface, per their
-   public docs) — this is doc-grounded, not confirmed against a real
-   WhiteBooks response payload. Verify against an actual sandbox e-invoice
-   response before assuming the payload builders need zero changes.
-   — Agreed, with the HSN-aggregation detail (a deliberate privacy measure —
-   items sharing an HSN code are combined before submission "to avoid leaking
-   info in public domain") called out as a specific piece of that logic that
-   must survive the migration untouched.
+   `get_einv_item_details`'s description-substitution step, etc.) — only the
+   HTTP/auth/base-URL plumbing around it changes, since the JSON shape
+   follows the government's IRP schema, not the vendor. **Documented, not
+   yet verified**: WhiteBooks and `india-compliance` both describe targeting
+   the same IRP schema (Client ID/Secret credentials against the same
+   government API surface, per their public docs) — this is doc-grounded,
+   not confirmed against a real WhiteBooks response payload. Verify against
+   an actual sandbox e-invoice response before assuming the payload builders
+   need zero changes.
+   — Agreed, with the description-substitution detail (a deliberate privacy
+   measure — `get_einv_item_details()` sends `hsn_doc.description` instead
+   of the item's real `row.description`, "to avoid leaking info in public
+   domain", one row per line item, itemwise pricing intact) called out as a
+   specific piece of that logic that must survive the migration untouched.
+   **Corrected during T3 (2026-08-22)**: this was originally described as
+   "HSN aggregation" (combining line items sharing an HSN code) — verified
+   by reading `get_einv_item_details()` that this is wrong. It's per-item
+   description substitution, not aggregation; no line items are combined,
+   and full itemwise price/tax detail is still sent per row.
 4. **No live-fallback flag, no dual-provider runtime switch.** WhiteBooks
    fully replaces Charteredinfo — validated per-API-family against
    WhiteBooks' sandbox before any production cutover, then the old
@@ -114,13 +142,35 @@ field plus a backfill patch for historical invoices.
 
 ## Data Model Changes
 
-- **Credentials**: new fields on `Rohit GST Settings` for WhiteBooks
-  `client_id`/`client_secret` (sandbox and production pairs — WhiteBooks
-  issues separate credentials per environment), using Frappe's encrypted
-  Password fieldtype, consistent with how `tax_pro_password` is stored
-  today. `tax_pro_asp_id`, `tax_pro_password`, and the cert-based fields
-  added in `f6b4d02` become obsolete once their owning API family cutovers
-  and are removed in that family's cutover change, not kept as dead fields.
+- **Credentials**: new fields on `Rohit Settings` (not `Rohit GST Settings`
+  — corrected during implementation; the existing ASP credential fields
+  `tax_pro_asp_id`/`tax_pro_password`/`tax_pro_asp_secret`/`eway_bill_id`/
+  `eway_bill_password` all actually live on `Rohit Settings`, confirmed by
+  reading `rohit_settings.json` and `common.py`'s `get_aspid_pass()`) for
+  WhiteBooks `client_id`/`client_secret`. **Revised during T3 (2026-08-22)**:
+  WhiteBooks issues a SEPARATE client_id/client_secret pair per API product
+  (e-Invoice, Public GST, e-Way Bill), each with its own sandbox/production
+  pair — 12 fields total (3 families × 2 envs × 2 fields:
+  `whitebooks_einv_client_id`/`_client_secret`/`_sandbox_client_id`/
+  `_sandbox_client_secret`, and the same pattern with `_gst_`/`_eway_`
+  prefixes), all grouped together under one collapsible "WhiteBooks GSP"
+  section on `Rohit Settings` (column breaks separate the three families
+  visually within that one section, per request — not three separate
+  sections). The existing `sandbox_mode` checkbox is reused as-is to select
+  environment for all three families, not duplicated per family.
+  **Correction**:
+  this section originally claimed Password fieldtype would be "consistent
+  with how `tax_pro_password` is stored today" — that was wrong.
+  `tax_pro_password`, `tax_pro_asp_secret`, and `eway_bill_password` are all
+  fieldtype **Data** (plaintext-in-DB, visible in API responses), not
+  Password. The new WhiteBooks fields use Password fieldtype anyway — a
+  deliberate improvement, not a consistency choice — since they're new
+  fields, not a migration of existing ones, and the existing Data-typed
+  fields are being deleted (not upgraded) once their owning family cuts
+  over. `tax_pro_asp_id`, `tax_pro_password`, `tax_pro_asp_secret`,
+  `eway_bill_id`, `eway_bill_password`, and the cert-based fields added in
+  `f6b4d02` all become obsolete once their owning API family cutovers and
+  are removed in that family's cutover change, not kept as dead fields.
   **Sandbox/production mixup safeguard**: which credential pair and base
   URL get used is selected explicitly by an environment flag (reusing the
   existing `Rohit Settings.sandbox_mode` pattern already used by
@@ -129,23 +179,30 @@ field plus a backfill patch for historical invoices.
   misconfiguration (e.g. a sandbox credential accidentally live in
   production) is visible in the log rather than silently wrong — real risk
   on a legal filing system.
-- **Async submission tracking (Approach C, both live and backlog paths)**: a
-  new log doctype (e.g. `E-Invoice Submission Log`) is required before
-  either submission-redesign path can be built — there is currently no
-  doctype that correlates an outbound WhiteBooks call (single-invoice live
-  call, or a multi-invoice backlog batch) with its later async webhook
-  result, and one has to exist for the webhook to have anything to update.
-  It needs a field distinguishing which path a given entry came from (live
-  vs backlog) since they have different retry/monitoring semantics — a
-  backlog entry sitting unresolved for hours is expected during a WhiteBooks
-  outage; a live entry sitting unresolved for more than a few seconds is an
-  anomaly. **Alerting mechanism (plan-eng-review finding — this requirement
-  had no implementation hook, would have shipped dormant)**: a new
-  scheduled task, following this app's existing `scheduler_events` pattern
-  (`scheduled_tasks/*.py`, per CLAUDE.md), runs every few minutes, checks
-  for live-path Submission Log entries older than a threshold (e.g. 60s)
-  still unresolved, and logs an alert-worthy Error Log entry for them. This doctype is a hard prerequisite of the
-  submission-redesign half of Approach C, not an incidental detail. It
+- **Async submission tracking — REVISED during T10 (2026-08-22): backlog
+  path only, not both paths.** Re-reading the WebSearch evidence from
+  Premise 2/3 more carefully: WhiteBooks' single-invoice generate call runs
+  at "less than 100ms typical latency" (synchronous, response embeds the
+  IRN directly — the same model T3's `generate_irn_whitebooks()` already
+  implements), while "webhook callbacks for async batches" is specifically
+  a bulk-submission feature (a 1,000-invoice batch can't complete in one
+  request/response cycle the way a single invoice can). So: the **live
+  path is synchronous** — `generate_irn_whitebooks()` called directly
+  inside a short-queue background job, IRN available immediately in the
+  same job, no async gap to correlate. `E-Invoice Submission Log` and the
+  webhook (T9) exist for the **backlog path only** — a true multi-invoice
+  bulk call genuinely needs async correlation, since WhiteBooks can't
+  return 1,000 IRNs synchronously. Each backlog-path log entry gets a
+  `submission_id` used to correlate the outbound bulk call with its later
+  webhook result. **Alerting mechanism (plan-eng-review finding, revised
+  scope)**: a new scheduled task, following this app's existing
+  `scheduler_events` pattern (`scheduled_tasks/*.py`, per CLAUDE.md), runs
+  every few minutes, checks for backlog-path Submission Log entries older
+  than a threshold (e.g. 30 minutes — backlog entries are expected to take
+  longer than a live call, unlike the original "few seconds" framing which
+  assumed live entries lived in this same doctype) still unresolved, and
+  logs an alert-worthy Error Log entry for them. This doctype is a hard
+  prerequisite of the backlog half of Approach C, not the live half. It
   inherits the same read-restriction posture as `signed_qr_code`/
   `qrcode_image` (see transaction-view-lock design) — it holds the same
   class of GST submission data and should not be a side door around that
@@ -172,21 +229,23 @@ field plus a backfill patch for historical invoices.
   against this instance's invoice volume — needs confirming against
   WhiteBooks' actual published limits before the submission-redesign half
   of Approach C is built, not assumed safe.
-- **Webhook idempotency**: the webhook endpoint (used by both the live and
-  backlog paths) must dedupe on the submission/batch ID before applying a
+- **Webhook idempotency**: the webhook endpoint (backlog path only, per the
+  T10 revision above) must dedupe on the submission ID before applying a
   result to `E-Invoice Submission Log` — webhooks can be delivered more than
   once, and a duplicate delivery must not double-apply an IRN/status update.
   This sits alongside signature verification as a blocking dependency, not
   an afterthought.
-- **Submission idempotency (distinct from webhook idempotency above)**: if
-  IRP successfully generates an IRN but the response leg times out or fails
-  before the job records success, a naive retry re-submits the same invoice
-  and IRP rejects it as a duplicate. This is a known GST-domain failure
-  mode, not hypothetical — `einv.py`'s current `generate_irn()` already
-  handles Charteredinfo's equivalent case (`ErrorCode 2150`, duplicate IRN
-  → fetch and record the existing IRN instead of treating it as a failure).
-  The WhiteBooks client must do the same: on a duplicate-IRN rejection,
-  treat it as success and look up the existing IRN (e.g. via WhiteBooks'
+- **Submission idempotency (distinct from webhook idempotency above,
+  applies to BOTH the live and backlog paths — this one isn't webhook-
+  specific)**: if IRP successfully generates an IRN but the response leg
+  times out or fails before the job records success, a naive retry
+  re-submits the same invoice and IRP rejects it as a duplicate. This is a
+  known GST-domain failure mode, not hypothetical — `einv.py`'s current
+  `generate_irn()` already handles Charteredinfo's equivalent case
+  (`ErrorCode 2150`, duplicate IRN → fetch and record the existing IRN
+  instead of treating it as a failure). The WhiteBooks client must do the
+  same: on a duplicate-IRN rejection, treat it as success and look up the
+  existing IRN (e.g. via WhiteBooks'
   documented "Lookup IRN by document number" endpoint) rather than
   surfacing it as an error.
 
@@ -214,41 +273,57 @@ Everything in B, plus **two distinct submission paths**, not a single bulk
 redesign (revised during plan-eng-review after clarifying the actual
 requirement — see below):
 
-1. **Live path (real-time, batch-of-1)**: every Sales Invoice submit
-   triggers its own WhiteBooks e-invoice call within seconds — no
-   accumulation window, no waiting for other invoices. This calls
-   WhiteBooks' bulk-capable endpoint with a single invoice, using the
-   webhook purely as async confirmation for that one invoice's IRN, not as
-   a batching mechanism. This is the primary, everyday path. **Still queued
-   via `frappe.enqueue`** (matching this app's existing
-   `background_doc_processing.py` pattern for external-API calls off a
-   submit hook), on the `short` named queue — **a separate queue from the
-   backlog/recovery path below, not shared.** `background_doc_processing.py`
-   already uses Frappe's named-queue mechanism (`enqueue(..., queue="long",
-   ...)` in `enqueue_bg()`), so this is a configuration-level distinction,
-   not new infrastructure. Without this separation, a backlog drain right at
-   WhiteBooks recovery (potentially many invoices competing for workers)
-   would delay live-path jobs exactly when the few-seconds latency
-   requirement matters most. Not called inline/synchronously from the Sales
-   Invoice `on_submit` hook, preserving the existing "never block the user's
-   submit on an external API" principle.
-2. **Backlog/recovery path (true multi-invoice bulk)**: when WhiteBooks'
-   API is unavailable (outage, rate-limited, or similar), invoices queue up
-   via the existing `background_doc_processing.py` pattern instead of
-   failing outright. Once the API recovers, the queued backlog is submitted
-   together via WhiteBooks' true bulk endpoint (up to 1,000/call), rather
-   than draining one at a time. This is a distinct, secondary workflow from
-   the live path, not the same codepath at higher volume.
+**REVISED during T10 implementation (2026-08-22) — corrected against the
+actual existing mechanism.** Earlier drafts of this section claimed the
+live path would reuse `background_doc_processing.py`'s existing pattern —
+wrong. That module handles a different, generic submit/cancel-background
+feature (`Rohit Settings.bg_submit_cancel_docs`), unrelated to e-invoicing.
+The actual current e-invoice mechanism is `scheduled_tasks/
+auto_einvoice_tasks.py`'s `*/15 * * * *` cron sweep (`enq_einv_create` →
+`make_einvoice_for_docs()`), which scans ALL submitted invoices missing an
+IRN and calls `generate_irn()` one at a time inside a single job run — not
+a per-submit enqueue. There is no existing `on_submit` hook for e-invoicing
+at all today. Also corrected: whether the live path even needs a webhook —
+re-reading the WebSearch evidence (Premise 2/3), WhiteBooks' single-invoice
+generate call is synchronous ("less than 100ms typical latency", IRN in the
+same response), while "webhook callbacks for async batches" is specifically
+a bulk-submission feature. The live path needs no webhook at all.
 
-Both paths write to `E-Invoice Submission Log` and share the OAuth2 client
-and webhook signature verification. Requires a new whitelisted webhook
-endpoint (`allow_guest=True` + signature verification + IP allowlist + rate
-limit, per the architecture finding above). Real capability win (the live
-path meets the actual latency requirement; the backlog path gives a real
-recovery mechanism for API outages that the original one-invoice-at-a-time
-queueing didn't have) but also real risk: it bundles a vendor migration with
-two new submission-flow behaviors on a compliance-critical path, on top of
-e-way bill being a greenfield implementation in the same window.
+1. **Live path (real-time, batch-of-1, synchronous)**: a NEW `on_submit`
+   doc_event hook for Sales Invoice enqueues `generate_irn_whitebooks()`
+   (T3, unchanged) on a dedicated `short` named queue, immediately at
+   submit time — replacing the 15-minute wait for the next cron sweep with
+   near-immediate processing, while still not blocking the user's submit
+   request (queued, not inline). The WhiteBooks call is synchronous within
+   that job: IRN comes back in the same HTTP response, same model as the
+   current Charteredinfo `generate_irn()`. No `E-Invoice Submission Log`
+   entry, no webhook — there's no async gap to correlate. A failure raises
+   inside the job and is caught/logged the same way any other background
+   job failure is.
+2. **Backlog/recovery path (true multi-invoice bulk, asynchronous)**: the
+   EXISTING `auto_einvoice_tasks.py` 15-minute sweep is repurposed as this
+   path, not replaced — it already finds every submitted invoice still
+   missing an IRN (which, once the live path exists, should normally be
+   empty; non-empty means the live path failed or WhiteBooks was down for
+   that invoice). Instead of calling `generate_irn()`/`generate_irn_whitebooks()`
+   one invoice at a time, the sweep is upgraded to submit everything it
+   finds together via WhiteBooks' true bulk endpoint (up to 1,000/call).
+   Each invoice in the batch gets an `E-Invoice Submission Log` entry
+   (`submission_path=Backlog`) so the later async webhook result can be
+   correlated back to it — this path genuinely needs the async
+   correlation the live path doesn't, since WhiteBooks can't return 1,000
+   IRNs synchronously.
+
+Only the backlog path uses `E-Invoice Submission Log`, the OAuth2 client's
+webhook signature verification, and the webhook endpoint (`allow_guest=True`
++ signature verification + IP allowlist + rate limit, per the architecture
+finding above). Real capability win (the live path meets the actual latency
+requirement via a genuinely new hook the app didn't have; the backlog path
+gives a real recovery mechanism for API outages, upgrading the existing
+sweep rather than leaving it as a slow one-at-a-time fallback) but also real
+risk: it bundles a vendor migration with two new submission-flow behaviors
+on a compliance-critical path, on top of e-way bill being a greenfield
+implementation in the same window.
 
 ## Session Recommendation vs. Chosen Approach
 
@@ -279,12 +354,14 @@ shipped as one combined change:
    the count to zero; the gate re-measures from the next clean day, it does
    not simply pause and resume. This is the concrete boundary that makes
    "the next few updates" an actual gate rather than a soft intention.
-3. Live path (real-time, batch-of-1) and backlog/recovery path, once the
-   gate above is met — see Approach C for what each path actually does.
-   The live path directly replaces the current one-invoice-at-a-time
-   `background_doc_processing.py` queueing for the happy-path case; the
-   backlog path is new behavior for the API-outage case that didn't exist
-   before.
+3. Live path (real-time, batch-of-1, synchronous) and backlog/recovery
+   path, once the gate above is met — see Approach C for what each path
+   actually does. The live path is a genuinely new `on_submit` hook
+   (nothing today enqueues per-invoice at submit time — the real existing
+   mechanism is `auto_einvoice_tasks.py`'s 15-minute cron sweep, corrected
+   from an earlier draft's wrong claim about `background_doc_processing.py`);
+   the backlog path repurposes that existing sweep, upgraded to WhiteBooks'
+   true bulk endpoint instead of one-invoice-at-a-time.
 
 This fits the user's own framing of this work as spanning multiple releases,
 not one PR — the sequencing is what makes the ambitious choice (C) safe
@@ -308,12 +385,17 @@ before writing code against it, not during.
   that reasoning doesn't actually hold (EC level affects damage tolerance,
   not encode/decode correctness) and shouldn't drive the decision. Instead,
   test-decode a random sample of at least 50 real historical `qrcode_image`
-  PNGs: if ≥95% decode cleanly, proceed with (a); otherwise (b). If (a) is
-  chosen: the bulk backfill patch writes historical `signed_qr_code` values
-  outside normal document save/validate hooks (patches typically use
-  `db_set`/direct SQL) — it must explicitly apply the same view-lock read
-  restriction itself, not assume a `validate` hook will catch it, since none
-  fires during a patch run. **Per-invoice failure path during the actual
+  PNGs: if ≥95% decode cleanly, proceed with (a); otherwise (b). **Correction
+  during T7 implementation (2026-08-22)**: this doc previously claimed the
+  backfill patch "must explicitly apply the same view-lock read restriction
+  itself... since none fires during a patch run" — that's wrong.
+  `has_permission`/`permission_query_conditions` are evaluated at READ time
+  (per request), not save/validate time — they don't care how a field's
+  value got into the database. A patch writing via `db.set_value` (which
+  does skip `validate`/`before_save` hooks) doesn't bypass the view-lock at
+  all, because the view-lock was never a save-time hook to begin with. No
+  special handling needed in the patch for this. **Per-invoice failure path
+  during the actual
   backfill run (plan-eng-review finding)**: the 95%-of-50 threshold decides
   whether to build the patch at all — it doesn't cover what happens to the
   invoices that don't decode once the patch runs at scale. Those must be
@@ -323,20 +405,34 @@ before writing code against it, not during.
   structure, not just "the decoder returned non-empty text") before being
   accepted — a truncated or corrupted decode that still "succeeds" is worse
   than a visibly blank field.
-- **New field scope** (blocks: the `signed_qr_code` field creation and the
-  patch). Which doctypes get it — Sales Invoice only, or also Journal Entry
-  (per `einv.py`'s docstring, e-invoicing also applies to debit/credit notes
-  raised as Journal Entries)? Field type (Long Text vs Small Text — signed
-  QR payloads can be long) needs confirming against a real WhiteBooks
-  sandbox response sample, checking the largest observed payload against
-  actual column capacity rather than picking Long Text by default. **Journal
-  Entry coverage check (plan-eng-review finding, resolved) — CONFIRMED**:
+- **New field scope — RESOLVED during T6 (2026-08-22): Sales Invoice only.**
+  Checked `rohit_common/custom/` directly: Journal Entry has NO custom
+  fields file in this app at all — no `irn`, `ack_no`, `ack_date`, or
+  `qrcode_image` exist there, despite `einv.py`'s docstring claiming
+  Journal Entry credit/debit notes are e-invoice-eligible. That whole field
+  family was apparently never built for Journal Entry — the docstring
+  describes intent, not shipped capability. Adding `signed_qr_code` to
+  Journal Entry now would be scope creep (it would need `irn`/`ack_no`/
+  `ack_date`/`qrcode_image` added first, a materially bigger change than
+  this task, for a code path that appears to have never actually worked).
+  **Journal Entry coverage check (plan-eng-review finding, still relevant
+  if Journal Entry e-invoicing is ever actually built) — CONFIRMED**:
   `hooks.py` already includes `Journal Entry` in the transaction view-lock's
   `has_permission`/`permission_query_conditions` allowlist (lines 86, 101),
-  so if `signed_qr_code` lands on Journal Entry, the existing lock already
-  reaches it — no silent bypass risk, no extra wiring needed. This was the
-  one genuine open item in the "which doctypes" question; the rest (field
-  type, exact column capacity) remains open.
+  so a future `signed_qr_code`-on-Journal-Entry addition would already be
+  covered by the lock — no extra wiring needed then, either.
+  **Field type — RESOLVED as Long Text.** A pre-existing dormant custom
+  field named `signed_qr_code` was found already on Sales Invoice (created
+  2021-01-07, fieldtype Code/options JSON, never referenced by any code —
+  confirmed via grep across the whole app) — reused rather than duplicated,
+  with its fieldtype changed to Long Text (Code and Long Text are both
+  `longtext` MariaDB columns, so this is a metadata-only change, not a data
+  migration — the field was never populated). Long Text was chosen without
+  a real WhiteBooks sample to check against (that verification still
+  hasn't happened) but Long Text has effectively unlimited practical
+  capacity for a signed-QR-length string, so this choice doesn't need
+  revisiting even once a real sample is available — unlike Small Text,
+  which would have needed the sample to rule out truncation risk first.
 - **e-Way Bill business rules** (blocks: e-way bill's swap/first-
   implementation work). Recommend splitting this into its own follow-up
   scoping doc rather than resolving it inline here — what triggers e-way
@@ -364,8 +460,9 @@ CODE PATHS                                          TEST TYPE
 
 [+] Per-family swap (einv.py, eway_bill_api.py, gst_public_api.py)
   ├── correct WhiteBooks base URL per family        [UNIT] one per family
-  ├── HSN-aggregation regression (Success Criteria) [UNIT] CRITICAL — combined
-  │                                                          line items in payload
+  ├── description-substitution regression (Success   [UNIT] CRITICAL — HSN
+  │    Criteria)                                             description, not
+  │                                                           item description, in payload
   └── search_gstin/track_return correctness         [UNIT] was broken on TaxPro;
                                                              this is the fix proof
 
@@ -395,9 +492,9 @@ CODE PATHS                                          TEST TYPE
 
 REGRESSION (mandatory, no AskUserQuestion needed): search_gstin/track_return
 were broken on TaxPro — the fix must be proven by a test, not just "it works
-in sandbox." HSN-aggregation and the transaction-view-lock inheritance are
-both existing behaviors this design must not silently break — both flagged
-CRITICAL above per the REGRESSION RULE.
+in sandbox." The item-description substitution and the transaction-view-lock
+inheritance are both existing behaviors this design must not silently break
+— both flagged CRITICAL above per the REGRESSION RULE.
 ```
 
 Legend: `[UNIT]` = unit test. `[→E2E]` = needs an integration/E2E test against
@@ -416,8 +513,9 @@ questions that a mock would hide.
   family once that family's cutover change lands — per-family, per Premise 4,
   not deferred to an all-three-done cleanup.
 - e-Invoice generation (highest priority) has zero regression in the
-  HSN-aggregation privacy behavior — verified by a test asserting combined
-  line items in the submitted payload, not just that submission succeeds.
+  item-description-substitution privacy behavior — verified by a test
+  asserting the HSN's generic description (not the item's real description)
+  appears in the submitted payload, not just that submission succeeds.
 - New `signed_qr_code` field is populated on every newly-issued e-invoice;
   historical backfill strategy is explicitly decided (not silently skipped)
   per the Open Questions above.
@@ -447,25 +545,28 @@ questions that a mock would hide.
   internal-only or firewalled bench would silently make the whole
   live/backlog submission-redesign half undeployable.
 - **Push-vs-poll async model is an unconfirmed, blocking dependency —
-  upstream of the signature-verification item below.** This session's
-  WebSearch found WhiteBooks' e-invoice docs mention "webhook callbacks for
-  async batches," but that's a general product-page mention, not a verified
-  API contract. If the actual mechanism is polling a status endpoint
-  (common among Indian GSP bulk-IRN APIs) rather than a genuine inbound
-  push, the entire webhook security surface designed below (allow_guest
-  endpoint, IP allowlist, signature verification, idempotency dedup, the
-  Submission Log's async-correlation shape) is the wrong architecture, not
-  a tunable detail — it would need replacing with a scheduled polling job
-  instead. Confirm the actual mechanism against WhiteBooks' real API
-  reference or a sandbox test before building any of the webhook-specific
-  pieces below.
+  upstream of the signature-verification item below. Scope narrowed during
+  T10 (2026-08-22): this only affects the BACKLOG path** (the live path is
+  synchronous, per the T10 revision above — no webhook involved at all for
+  it). This session's WebSearch found WhiteBooks' e-invoice docs mention
+  "webhook callbacks for async batches" specifically for bulk submission,
+  but that's a general product-page mention, not a verified API contract.
+  If the actual mechanism is polling a status endpoint (common among Indian
+  GSP bulk-IRN APIs) rather than a genuine inbound push, the entire webhook
+  security surface designed below (allow_guest endpoint, IP allowlist,
+  signature verification, idempotency dedup, the Submission Log's
+  async-correlation shape) is the wrong architecture for the backlog path,
+  not a tunable detail — it would need replacing with a scheduled polling
+  job instead. Confirm the actual mechanism against WhiteBooks' real API
+  reference or a sandbox test before relying on any of the webhook-specific
+  pieces below for real backlog submissions.
 - **WhiteBooks webhook signature/verification mechanism is an unconfirmed,
-  blocking dependency** of both the live and backlog paths of Approach C —
-  not merely an open question, and conditional on the push model above
-  actually being confirmed. The webhook endpoint cannot be safely
-  implemented (unverified inbound calls would be a real vulnerability on a
-  doctype-writing endpoint) until this is confirmed against WhiteBooks'
-  actual docs.
+  blocking dependency** of the backlog path of Approach C only (not the
+  live path, which needs no webhook) — not merely an open question, and
+  conditional on the push model above actually being confirmed. The
+  webhook endpoint cannot be safely implemented (unverified inbound calls
+  would be a real vulnerability on a doctype-writing endpoint) until this
+  is confirmed against WhiteBooks' actual docs.
 - **Webhook endpoint security surface (plan-eng-review finding).** The
   endpoint must accept calls from WhiteBooks with no Frappe session, i.e.
   `@frappe.whitelist(allow_guest=True)` — this app currently has zero
@@ -513,11 +614,15 @@ full functional correctness per API family (e.g. `search_gstin`/
 
 ## What Already Exists
 
-- **Payload builders** (`gen_einv_json`, `get_eway_details`, HSN-aggregation
-  logic) — reused as-is per Premise 3, not rebuilt.
-- **`background_doc_processing.py`** — the existing background-queueing
-  pattern is reused for both the live path (high-priority queue) and the
-  backlog/recovery path, not replaced with new infrastructure.
+- **Payload builders** (`gen_einv_json`, `get_eway_details`,
+  `get_einv_item_details`'s description-substitution logic) — reused as-is
+  per Premise 3, not rebuilt.
+- **`auto_einvoice_tasks.py`'s 15-minute sweep** — the existing e-invoice
+  polling mechanism is reused/upgraded as the backlog path (bulk endpoint
+  instead of one-at-a-time), not replaced with new infrastructure.
+  `frappe.enqueue`'s named-queue mechanism (already used elsewhere in this
+  app, e.g. `background_doc_processing.py`'s `queue="long"`) is reused for
+  the live path's new `short`-queue job, not invented.
 - **`_get_with_session_retry`'s single-retry-after-invalidate pattern**
   (`gst_public_api.py`) — reused as the model for the new OAuth2 client's
   token-expiry-retry behavior (Error Handling section).
@@ -537,7 +642,13 @@ full functional correctness per API family (e.g. `search_gstin`/
 | Live path submission | WhiteBooks e-invoice endpoint times out | Yes (Test Coverage) | Yes — fail loud, no silent retry beyond 1 token-refresh | Sales Invoice shows no IRN; needs a status indicator (not yet specified — see below) |
 | Webhook delivery | Duplicate/replayed webhook call | Yes (Test Coverage) | Yes — idempotency dedupe on submission ID | Not visible if dedupe works; **critical gap if it doesn't** — see below |
 | Backlog recovery | Partial batch failure (some invoices succeed, some fail in one bulk call) | Yes (Test Coverage) | Yes — per-invoice result handling, not all-or-nothing | Depends on per-invoice status surfacing — not yet specified |
-| QR backfill patch | Patch bypasses `validate` hooks, writes view-lock-restricted data | Not yet — needs adding | Yes — patch must explicitly apply restriction | Not visible if done wrong (silent access-control gap) |
+| QR backfill patch | Decoded QR text is malformed/truncated but "succeeds" | Yes (T7: `is_valid_signed_qr`) | Yes — structural validation before accepting, per-invoice failures logged | Visible (patch report), not silent |
+
+**Corrected during T7 (2026-08-22)**: the view-lock-bypass row above was
+removed — it was based on the same incorrect "patches bypass the view-lock"
+premise corrected in the Open Questions backfill section. The view-lock is
+read-time, unaffected by how a field's value was written, so this was never
+a real failure mode.
 
 **Critical gaps flagged** (no test AND no error handling AND would be silent
 if unaddressed):
@@ -549,12 +660,7 @@ if unaddressed):
    worth flagging as the single highest-consequence-if-wrong item in the
    whole design, given it's the only place a bug produces silently wrong
    compliance data rather than a visible failure.
-2. **QR backfill patch's view-lock inheritance has a test requirement now
-   (Test Coverage) but was not originally called out as a failure mode** —
-   if the patch's hook-bypass handling is implemented wrong, restricted GST
-   data becomes readable with no error and no visible symptom. Confirmed
-   addressed by the Test Coverage section added during this review.
-3. **User-visible status for a failed/pending live-path submission is not
+2. **User-visible status for a failed/pending live-path submission is not
    yet specified** — if WhiteBooks is down, what does a Sales Invoice show
    while its e-invoice submission is queued/retrying/failed? Today's
    `qrcode_image` field just stays empty with no indicator either way. Not
@@ -572,7 +678,8 @@ if unaddressed):
 | QR backfill decode-sample test | (standalone script/patch prep, no production code dependency) | — (can start immediately, independent of the swap) |
 | `signed_qr_code` field + live backfill patch | `doctype/rohit_settings/` custom fields, new patch | e-Invoice swap (field is populated by post-swap flow) |
 | `E-Invoice Submission Log` doctype | new doctype | — (can be built anytime before the live/backlog paths) |
-| Live path + backlog path | `background_doc_processing.py`, new webhook endpoint | ALL per-family swaps cut over + 14-day stability gate |
+| Live path (new on_submit hook) | `hooks.py` doc_events, `scheduled_tasks/auto_einvoice_tasks.py` | ALL per-family swaps cut over + 14-day stability gate |
+| Backlog path + webhook | `scheduled_tasks/auto_einvoice_tasks.py` (upgraded sweep), new webhook endpoint | ALL per-family swaps cut over + 14-day stability gate |
 
 **Lanes:**
 - Lane A: Shared OAuth2 client → e-Invoice swap (sequential, shared `india_gst_api/`)
@@ -598,54 +705,282 @@ lands, not in parallel with it, to avoid merge conflicts in the same file.
 Synthesized from this review's findings. Each task derives from a specific
 finding above. Run with Claude Code or Codex; checkbox as you ship.
 
-- [ ] **T1 (P1, human: ~1 day / CC: ~1 hr)** — india_gst_api — Build shared WhiteBooks OAuth2 client + provider interface
+- [x] **T1 (P1, human: ~1 day / CC: ~1 hr)** — india_gst_api — Build shared WhiteBooks OAuth2 client + provider interface
   - Surfaced by: Premise 2 / Approach B
-  - Files: `india_gst_api/whitebooks_provider.py`, `india_gst_api/gsp_provider.py`
-  - Verify: sandbox auth handshake (The Assignment)
+  - Files: `india_gst_api/whitebooks_provider.py`, `india_gst_api/gsp_provider.py`,
+    `india_gst_api/test_whitebooks_provider.py`, `doctype/rohit_settings/rohit_settings.json`
+    (new 12-field "WhiteBooks GSP" section — per-family client_id/client_secret ×
+    sandbox/production for e-Invoice/Public GST/e-Way Bill, client_id Data,
+    client_secret Password, reusing the existing `sandbox_mode` checkbox — revised
+    from an initial one-shared-pair design after user correction, see Premise 2)
+  - Verify: 22 unit tests pass (per-family token cache/fetch, per-family base
+    URL, header building, single-retry-on-401, missing-credentials error).
+    Sandbox auth handshake (The Assignment) still outstanding — credentials
+    exist per the user but haven't been entered into Rohit Settings yet, so
+    the real end-to-end call is unverified. Token endpoint path
+    (`/oauth/token`) and the Public GST API's base path (`/gst`) are both
+    flagged UNVERIFIED in the module docstring — confirm against WhiteBooks'
+    actual docs/sandbox response before trusting this in production, per the
+    design doc's Premise 2/3 "documented, not yet verified" corrections.
 - [ ] **T2 (P1, human: ~2 hrs / CC: ~20 min)** — india_gst_api — Confirm push-vs-poll async model against WhiteBooks docs/sandbox before webhook design proceeds
   - Surfaced by: cross-model tension 2 (blocking dependency)
   - Files: `india_gst_api/`
   - Verify: WhiteBooks API reference or sandbox test confirms webhook push (not polling)
-- [ ] **T3 (P1, human: ~4 hrs / CC: ~30 min)** — india_gst_api — Swap e-Invoice auth to WhiteBooks provider
+- [x] **T3-PARTIAL (P1, human: ~4 hrs / CC: ~30 min)** — india_gst_api — Build (not yet cut over) WhiteBooks e-Invoice generation path
   - Surfaced by: Premise 1 priority order, Success Criteria
-  - Files: `india_gst_api/einv.py`
-  - Verify: HSN-aggregation regression test (Test Coverage) passes
-- [ ] **T4 (P2, human: ~3 hrs / CC: ~20 min)** — india_gst_api — Swap Public GST API auth to WhiteBooks provider, delete gsp_session.py
+  - Files: `india_gst_api/einv.py` (new: `generate_irn_whitebooks()`,
+    `get_irn_details_whitebooks_by_doc()`, `_handle_generate_irn_response()`,
+    `_parse_generate_irn_response()`, `_extract_whitebooks_error_code()` —
+    added alongside the existing Charteredinfo functions, NOT yet wired into
+    the live call path and NOT deleting Charteredinfo code, per Premise 4 —
+    that cutover waits for a real sandbox handshake), `india_gst_api/
+    test_einv_whitebooks.py` (12 new tests, all passing)
+  - Verify: description-substitution regression test (Test Coverage) passes
+    — confirmed via `TestDescriptionSubstitutionRegression`, which also
+    caught and fixed a bug in the test's own mock (frappe._dict as a bare
+    MagicMock silently shared one object across loop iterations — fixed
+    with a real dict-subclass stand-in). Response envelope this parses
+    (_parse_generate_irn_response, WHITEBOOKS_DUPLICATE_IRN_ERROR_CODE) is
+    an UNVERIFIED ASSUMPTION flagged directly in einv.py — not Charteredinfo's
+    ad hoc Status/Data/ErrorDetails shape, assumed to be a conventional REST
+    envelope instead. Remaining for full T3: sandbox-verify the response
+    shape, then wire generate_irn_whitebooks() into the live call sites and
+    delete the Charteredinfo-specific einv.py code in the same change
+    (Premise 4's actual cutover step) — not done yet, intentionally.
+- [x] **T4-PARTIAL (P2, human: ~3 hrs / CC: ~20 min)** — india_gst_api — Build (not yet cut over) WhiteBooks Public GST API path
   - Surfaced by: Premise 1 priority order
-  - Files: `india_gst_api/gst_public_api.py`, `india_gst_api/gsp_session.py`
-  - Verify: search_gstin/track_return correctness test (Test Coverage)
-- [ ] **T5 (P2, human: ~3 hrs / CC: ~20 min)** — india_gst_api — Swap e-Way Bill auth to WhiteBooks provider (plumbing only)
+  - Files: `india_gst_api/gst_public_api.py` (new: `search_gstin_whitebooks()`,
+    `track_return_whitebooks()` — added alongside the existing broken
+    Charteredinfo functions, NOT wired into the live call path,
+    `gsp_session.py` NOT deleted yet — same per-family sequencing as T3),
+    `india_gst_api/test_whitebooks_public_api.py` (6 new tests, all passing)
+  - Verify: request-wiring tests pass (base URL, headers, params, retry
+    family). `get_arn_status()` (the vendor-agnostic response parser, reused
+    unchanged) confirmed to still work against the assumed WhiteBooks
+    response shape via `test_response_still_parses_via_get_arn_status`.
+    Endpoint paths (`/gstin-search`, `/return-track`) and the assumption
+    that WhiteBooks' return-tracking response reuses the same `EFiledlist`
+    shape are both flagged UNVERIFIED in the module note above the new
+    functions — WhiteBooks' Public GST API docs describe capabilities
+    (GSTIN verification, HSN/SAC lookup) but not exact paths. Since
+    `search_gstin()`/`track_return()` are the two calls currently BROKEN in
+    production (per Status Quo), this is genuinely a fix waiting on sandbox
+    verification, not just a swap of working code. Remaining for full T4:
+    sandbox-verify the response shape and endpoint paths, wire the
+    WhiteBooks functions into the live call sites, delete `gsp_session.py`
+    and the Charteredinfo-specific code in `gst_public_api.py` in the same
+    change (Premise 4's cutover step) — not done yet, intentionally.
+- [x] **T5-PARTIAL (P2, human: ~3 hrs / CC: ~20 min)** — india_gst_api — Build (not yet cut over) WhiteBooks e-Way Bill plumbing
   - Surfaced by: Premise 1 priority order, cross-model tension 4 (kept in scope)
-  - Files: `india_gst_api/eway_bill_api.py`
-  - Verify: per-family swap test (Test Coverage)
-- [ ] **T6 (P1, human: ~2 hrs / CC: ~15 min)** — doctype — Add signed_qr_code field to Sales Invoice (+ Journal Entry)
-  - Surfaced by: Premise 5, Open Questions (Journal Entry coverage confirmed)
-  - Files: `custom/sales_invoice.json`
-  - Verify: view-lock inheritance test (Test Coverage, CRITICAL)
-- [ ] **T7 (P1, human: ~4 hrs / CC: ~30 min)** — patches — Write QR backfill patch
+  - Files: `india_gst_api/eway_bill_api.py` (new: `generate_ewb_whitebooks()`,
+    `cancel_ewb_whitebooks()`, `update_part_b_whitebooks()` — plumbing only,
+    no business-rules code per the TODOS.md deferral; NOT wired into any live
+    call path — e-way bill has no production call sites to swap yet anyway),
+    `india_gst_api/test_whitebooks_eway.py` (7 new tests, all passing)
+  - Verify: request-wiring tests pass (endpoint paths, JSON body, header
+    auth, retry family, no caller-dict mutation in `update_part_b_whitebooks`).
+    **Found, initially deferred, then fixed (2026-08-22)**: `get_eway_pass()`
+    (existing Charteredinfo code) hardcoded a sandbox username/password
+    directly in source — a committed secret, unrelated to this migration.
+    Removed: the sandbox branch now throws a clear error instead of
+    returning the hardcoded literal or silently falling back to the
+    production credential against a sandbox endpoint. Low risk to the
+    currently-live e-invoice path — that path runs with `sandbox_mode`
+    off in production (real IRNs, not test ones), so this branch is only
+    hit during manual sandbox testing, not live traffic. No test coverage
+    existed for `get_eway_pass()` before or after this fix — not added here
+    since the function is scheduled for deletion at T5's actual cutover,
+    not being kept long-term. Endpoint paths (`/generate-ewb`, `/cancel`, `/update-part-b`)
+    ARE confirmed from WhiteBooks' own e-Way Bill API docs (more concrete
+    than the guessed paths in T3/T4) but the request/response JSON body
+    shape is still UNVERIFIED — the existing Charteredinfo payload-assembly
+    helpers (`get_supply_type`, `get_docno`, etc.) aren't reused yet since
+    e-way bill's actual trigger/business rules are still deferred (see
+    TODOS.md). Remaining for full T5: business-rules design (separate doc),
+    then wiring these functions into whatever call path that design
+    produces — this task has no "cutover" step the way T3/T4 do, since
+    there's no live e-way bill path to replace.
+- [x] **T6 (P1, human: ~2 hrs / CC: ~15 min)** — doctype — Reuse dormant signed_qr_code field on Sales Invoice
+  - Surfaced by: Premise 5, Open Questions (resolved: Sales Invoice only —
+    Journal Entry has no irn/ack_no/ack_date/qrcode_image fields at all,
+    despite einv.py's docstring; adding the whole family there is out of
+    T6's scope)
+  - Files: `custom/sales_invoice.json` — found and reused a pre-existing
+    dormant `signed_qr_code` field (created 2021-01-07, never referenced by
+    any code) instead of creating a duplicate; changed its fieldtype from
+    Code/JSON to Long Text (metadata-only, both are `longtext` columns,
+    field was never populated) and gave it a real label + description
+  - Verify: JSON validated (53 fields, single `signed_qr_code` entry, no
+    duplicates). View-lock inheritance doesn't need a NEW test — Sales
+    Invoice is already in the transaction view-lock's doctype allowlist
+    (confirmed earlier in Open Questions), so any field on Sales Invoice,
+    including this one, already inherits the lock; no per-field wiring
+    exists to test. Populating the field (actually writing to it) still
+    depends on T3's live cutover, which hasn't happened.
+- [x] **T7-INFRA (P1, human: ~4 hrs / CC: ~30 min)** — patches — Build QR backfill infrastructure (decision NOT yet made)
   - Surfaced by: Open Questions, cross-model tension 12
-  - Files: `patches/` (new)
-  - Verify: 50-sample decode threshold test, per-invoice failure report, decoded-output shape validation
-- [ ] **T8 (P1, human: ~2 hrs / CC: ~15 min)** — doctype — Create E-Invoice Submission Log doctype
+  - Files: `india_gst_api/qr_backfill.py` (new: `decode_qr_image()`,
+    `is_valid_signed_qr()`, `sample_decode_check()`, `backfill_signed_qr_code()`),
+    `india_gst_api/test_qr_backfill.py` (19 new tests, all passing),
+    `patches/v13/backfill_signed_qr_code.py` (new, registered in
+    `patches.txt`), `requirements.txt` (+`pyzbar`, +`Pillow`),
+    `docs/qr-backfill-runbook.md` (new — the manual Step 1-4 checklist:
+    run `sample_decode_check()`, decide, run the backfill, verify; linked
+    from the patch's warning message so whoever hits the
+    `qr_backfill_confirmed` guard finds it immediately, not just from this
+    design doc)
+  - Verify: 19 unit tests pass — decode wiring, structural validation
+    (`is_valid_signed_qr`), sample-check reporting, per-invoice failure
+    logging (not silent). **The actual ≥95%-of-50-sample decision has NOT
+    been made** — this environment has no bench/site/production data, so
+    `sample_decode_check()` has never been run against real historical
+    `qrcode_image` PNGs. The patch itself is gated on
+    `frappe.flags.qr_backfill_confirmed` (defaults False) specifically so
+    it can be registered in `patches.txt` now (required for it to exist as
+    an executable patch at all) without silently running or defaulting to
+    "backfill everything" the first time someone runs `bench migrate` —
+    it's a deliberate opt-in once the sample check has actually been run.
+    **Corrected during T7**: the design doc previously claimed the patch
+    "must explicitly apply the same view-lock read restriction itself" —
+    wrong; the view-lock is read-time (`has_permission`/
+    `permission_query_conditions`), unaffected by how a field was written,
+    so no special handling was needed. Also: `pyzbar` needs the
+    system-level `zbar` library, which this environment can't confirm is
+    installable on the target bench (still an open item, per the design
+    doc's own note).
+- [x] **T8 (P1, human: ~2 hrs / CC: ~15 min)** — doctype — Create E-Invoice Submission Log doctype
   - Surfaced by: Data Model Changes
-  - Files: `doctype/e_invoice_submission_log/` (new)
-  - Verify: view-lock inheritance test (Test Coverage)
-- [ ] **T9 (P1, human: ~1 day / CC: ~1 hr)** — webhook — Build webhook endpoint
+  - Files: `doctype/e_invoice_submission_log/` (new — `reference_doctype`/
+    `reference_name` correlation, `submission_path` Live/Backlog,
+    `environment` Sandbox/Production per the credential-mixup safeguard,
+    `status`, `submission_id` (unique, indexed — the webhook idempotency
+    dedupe key), `irn`, `submitted_on` (the view-lock's date field),
+    `error_message`); `validations/transaction_lock.py` (added
+    `"E-Invoice Submission Log": "submitted_on"` to
+    `LOCKED_DOCTYPE_DATE_FIELDS`, plus a small latent-bug fix — the
+    slug-generation loop only replaced spaces, not hyphens, which would
+    have produced an unusual-but-technically-working hyphenated function
+    name for this doctype; now replaces both); `hooks.py` (added the new
+    doctype to both `permission_query_conditions` and `has_permission`);
+    `validations/test_transaction_lock.py` (2 new tests, bench-independent,
+    both passing); `CLAUDE.md` (updated doctype count/list note)
+  - Verify: registration tests pass (doctype is in
+    `LOCKED_DOCTYPE_DATE_FIELDS`, the generated
+    `get_permission_query_conditions_e_invoice_submission_log` function
+    exists and is callable). Full integration behavior (actual has_permission
+    denial/allow against a real record) relies on the existing
+    `TestTransactionLockIntegration` class's bench-dependent tests, which
+    already exercise the generic mechanism this doctype now participates
+    in — not re-tested per-doctype, consistent with how the original 12
+    doctypes aren't each individually integration-tested either.
+
+**Verification note (2026-08-22, between T8 and T9): a real bench was found
+on this machine** (`/home/aditya/v12`, site `dev-rb-v12`, MariaDB + Redis
+running, `bench` on PATH) — T1-T8 above were built and unit-tested against
+hand-rolled Python stubs under the (wrong) assumption that no bench was
+reachable. Re-ran all 61 new tests for real via
+`bench --site dev-rb-v12 run-tests --app rohit_common --module <module>`:
+**all pass**, no gaps found between the stubs and real Frappe. Also
+attempted to actually resolve the QR backfill Open Question for real using
+`sample_decode_check()` against `dev-rb-v12`'s data: the site has 26,143
+real `Sales Invoice` rows with `qrcode_image` set (and confirmed
+`frappe.get_all` with the `["is", "set"]` filter — what `_candidate_invoices()`
+actually uses — returns them correctly), but the site's `private/files`
+directory is empty — only file *metadata* rows exist in the DB, the actual
+PNG bytes were never restored/synced to this dev environment. The sample
+check ran and correctly reported 0/50 with a precise per-file error
+(`No such file or directory`), which is the honest, correct output given
+the missing files — **this does not answer the ≥95% question**, it confirms
+this specific dev site can't answer it. The decision still needs a site
+with real file attachments (production, or a dev copy that includes
+`private/files`) — `docs/qr-backfill-runbook.md` Step 1 is unchanged.
+Going forward, `bench --site dev-rb-v12 run-tests` is used directly instead
+of stub-mocking for any further tests in this design.
+
+- [x] **T9-BUILT-NOT-REGISTERED (P1, human: ~1 day / CC: ~1 hr)** — webhook — Build webhook endpoint
   - Surfaced by: Architecture finding 1, Error Handling
-  - Files: `india_gst_api/` (new whitelisted method)
-  - Verify: signature valid/invalid, replay, rate-limit, IP-allowlist tests (Test Coverage, CRITICAL)
-- [ ] **T10 (P1, human: ~3 hrs / CC: ~20 min)** — background_jobs — Live path: separate short queue, batch-of-1
-  - Surfaced by: cross-model tension 6
-  - Files: `background_doc_processing.py`
-  - Verify: live-path E2E test (Test Coverage), queue isolation from backlog path
-- [ ] **T11 (P2, human: ~4 hrs / CC: ~30 min)** — background_jobs — Backlog/recovery path: true multi-invoice bulk submission
+  - Files: `india_gst_api/webhook.py` (new: `whitebooks_einvoice_webhook()`
+    the `allow_guest=True` + rate-limited entry point, `verify_webhook_signature()`,
+    `check_ip_allowlist()`, `process_webhook_result()`),
+    `india_gst_api/test_webhook.py` (18 new tests, all passing),
+    `doctype/rohit_settings/rohit_settings.json` (new "WhiteBooks Webhook"
+    section: `whitebooks_webhook_secret` (Password, fails closed if blank),
+    `whitebooks_webhook_ip_allowlist` (Data, comma-separated, not enforced
+    if blank))
+  - Verify: **run for real** (see verification note above) —
+    `bench --site dev-rb-v12 run-tests` for the 18 tests (signature valid/
+    tampered/missing/unconfigured-secret, IP allowlist enforced/not-enforced/
+    rejected, idempotency dedupe on Success/Failed states, unknown
+    submission_id, end-to-end entry-point wiring), plus `bench migrate`
+    confirmed the new Rohit Settings fields land with correct types
+    (Password/Data) and are readable via `frappe.get_meta`. Uncovered a real
+    API-shape mistake while writing the entry-point tests: `frappe.whitelist`
+    does not wrap the function or set `.whitelisted`/`.allow_guest`
+    attributes on it (confirmed by reading `frappe/__init__.py:704`) — it
+    registers the function by identity in two module-level lists
+    (`frappe.whitelisted`, `frappe.guest_methods`) and returns it unchanged.
+    Fixed the test to check real registration in those lists instead of a
+    wrong attribute-based assumption.
+  - **NOT registered with WhiteBooks — do not treat as live.** Two blocking
+    dependencies remain open: T2 (push-vs-poll, unconfirmed) and the
+    signature mechanism itself (HMAC-SHA256 assumed, not confirmed against
+    WhiteBooks' real docs). The payload/response shape
+    (`submission_id`/`irn`/`status`/`error` keys) is also an unverified
+    guess. All three are flagged directly in the module docstring.
+- [x] **T10 (P1, human: ~3 hrs / CC: ~20 min)** — doc_events/scheduled_tasks — Live path: new on_submit hook, synchronous, short queue
+  - Surfaced by: cross-model tension 6 (revised during T10 — see Approach C's 2026-08-22 correction: no webhook/Submission Log involved, synchronous within the job)
+  - Files: `hooks.py` (Sales Invoice `on_submit` is now a LIST —
+    `[sales_invoice.on_submit, auto_einvoice_tasks.queue_live_einvoice_submission]`,
+    merging alongside existing rohit_common and ERPNext core handlers —
+    verified via `frappe.get_doc_hooks()` on the real bench that all of
+    them, including ERPNext's own regional/tax-log on_submit hooks, still
+    run together correctly), `scheduled_tasks/auto_einvoice_tasks.py`
+    (new: `queue_live_einvoice_submission()` the doc_event,
+    `_live_einvoice_applicable()` mirrors `make_einvoice_for_docs()`'s
+    existing gating so live and backlog agree on eligibility,
+    `submit_live_einvoice_whitebooks()` the short-queue job body — calls
+    T3's `generate_irn_whitebooks()` synchronously, catches+logs+re-raises
+    on failure so RQ sees the job as failed and the invoice falls through
+    to the backlog sweep on its next run)
+  - Verify: 10 unit tests, all passing on the real bench
+    (`bench --site dev-rb-v12 run-tests`) — applicability gating (disabled/
+    before-date/einv-not-needed/no-date-configured), enqueue wiring (short
+    queue, correct dtype/dname), doc_event signature compatibility
+    (`fn(doc, method)`), job-body success and failure paths.
+- [x] **T11 (P2, human: ~4 hrs / CC: ~30 min)** — scheduled_tasks — Backlog/recovery path: true multi-invoice bulk submission
   - Surfaced by: Approach C
-  - Files: `background_doc_processing.py`
-  - Verify: partial-batch-failure test (Test Coverage, CRITICAL)
-- [ ] **T12 (P2, human: ~1 hr / CC: ~10 min)** — scheduled_tasks — Alerting: flag stuck live-path entries
+  - Files: `india_gst_api/einv.py` (new: `generate_irn_whitebooks_bulk()` —
+    client-generated `submission_id` per invoice embedded as `_referenceId`
+    in each payload, POSTs one bulk request, parses synchronously-rejected
+    invoices from the response by matching `referenceId` back to the
+    invoice), `scheduled_tasks/auto_einvoice_tasks.py` (new:
+    `make_einvoice_for_docs_whitebooks_bulk()` — NOT wired into
+    `scheduler_events` yet, `make_einvoice_for_docs()`'s live Charteredinfo
+    sweep is untouched and still runs; finds the same candidate invoices,
+    creates one `E-Invoice Submission Log` entry per invoice — `Failed`
+    with error for synchronous rejections, `Submitted` awaiting the webhook
+    for everything else)
+  - Verify: 6 new `einv.py` tests + 5 new `auto_einvoice_tasks.py` tests
+    (14 + 15 total in those files respectively), all passing on the real
+    bench. Partial-batch-failure specifically covered end to end: a batch
+    with one accepted + one rejected invoice produces exactly one
+    `Submitted` and one `Failed` log entry with the right error message —
+    not all-or-nothing. Request/response shape (the `_referenceId` wrapper
+    field, the `{"rejected": [...]}` response shape) is UNVERIFIED, flagged
+    in the module docstring alongside T3's existing unverified-shape notes.
+- [x] **T12 (P2, human: ~1 hr / CC: ~10 min)** — scheduled_tasks — Alerting: flag stuck backlog-path entries (revised scope — live path has no async gap to get stuck in)
   - Surfaced by: cross-model tension 10
-  - Files: `scheduled_tasks/` (new task)
-  - Verify: entry older than 60s and unresolved triggers a logged alert
+  - Files: `scheduled_tasks/alert_stuck_einvoice_submissions.py` (new:
+    `execute()` — queries `E-Invoice Submission Log` for
+    `submission_path=Backlog`, `status=Submitted`, `submitted_on` older than
+    `STUCK_THRESHOLD_MINUTES = 30`; logs one consolidated `frappe.log_error`
+    naming every stuck entry, no-op if none found), `hooks.py`
+    (`scheduler_events["cron"]["*/5 * * * *"]` — wired, confirmed merged
+    correctly via `frappe.get_hooks("scheduler_events")` on the real bench)
+  - Verify: 3 new tests (no-stuck-entries no-op, stuck entries produce one
+    consolidated alert naming every entry, query filters assert
+    `submission_path=Backlog` / `status=Submitted` / `submitted_on < cutoff`),
+    all passing on the real bench.
 - [ ] **T13 (P3, human: ~1 hr / CC: ~10 min)** — docs — Scope e-Way Bill business rules as separate design doc
   - Surfaced by: TODOS.md entry
   - Files: none (planning task)
@@ -662,11 +997,16 @@ enable `/autoplan` aggregation across phases._
   api thoroughly in sandbox mode." That's a sharper read of where the real
   risk lives (untested code path) than where it looks like it lives (no
   fallback).
-- You flagged the HSN-aggregation detail unprompted, mid-premise-check,
-  because it's a business-logic property this app has that a generic
-  "keep the payload builders as-is" premise could easily have missed if you
-  hadn't named it explicitly — "we don't send item wise details to gstin but
-  combine the same hsn code to avoid leaking info in public domain."
+- You flagged a payload-privacy detail unprompted, mid-premise-check —
+  "we don't send item wise details to gstin but combine the same hsn code
+  to avoid leaking info in public domain" — because it's a business-logic
+  property this app has that a generic "keep the payload builders as-is"
+  premise could easily have missed if you hadn't named it explicitly. The
+  actual mechanism turned out to be different from how you described it
+  (description substitution via generic HSN text, not line-item
+  aggregation — corrected during T3 after reading the real code), but
+  naming it at all is what made that correction possible before the wrong
+  version got built into a test.
 - You picked the highest-risk, highest-ceiling architecture (a submission-
   flow redesign bundled with the vendor swap) over the recommended safer
   option, consistent with framing this as multi-release work rather than

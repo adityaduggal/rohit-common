@@ -1,0 +1,141 @@
+{
+ "autoname": "hash",
+ "creation": "2026-08-22 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "reference_doctype",
+  "reference_name",
+  "submission_path",
+  "environment",
+  "status",
+  "cb0",
+  "submission_id",
+  "irn",
+  "submitted_on",
+  "sb0",
+  "error_message"
+ ],
+ "fields": [
+  {
+   "fieldname": "reference_doctype",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Reference Document Type",
+   "options": "DocType",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Dynamic Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Reference Name",
+   "options": "reference_doctype",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "description": "Live: real-time, batch-of-1, submitted within seconds of Sales Invoice submission. Backlog: true multi-invoice bulk submission during/after a WhiteBooks outage recovery. See docs/designs/gst-asp-migration-whitebooks.md, Approach C.",
+   "fieldname": "submission_path",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Submission Path",
+   "options": "Live\nBacklog",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "description": "Which WhiteBooks credential pair/base URL this submission used (Rohit Settings.sandbox_mode at submission time) - logged explicitly so a sandbox-vs-production credential mixup is visible here, not silent.",
+   "fieldname": "environment",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Environment",
+   "options": "Sandbox\nProduction",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "Queued",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Queued\nSubmitted\nSuccess\nFailed",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "cb0",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The ID used to correlate an outbound WhiteBooks call with its later async webhook result, and to dedupe a replayed/duplicate webhook delivery against this entry - see the design doc's webhook idempotency requirement.",
+   "fieldname": "submission_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Submission ID",
+   "read_only": 1,
+   "search_index": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "irn",
+   "fieldtype": "Data",
+   "label": "IRN",
+   "read_only": 1
+  },
+  {
+   "description": "When this submission was made - the transaction view-lock's date field for this doctype (see LOCKED_DOCTYPE_DATE_FIELDS in transaction_lock.py). A live-path entry unresolved more than a few seconds past this timestamp is the anomaly the alerting task (T12) watches for.",
+   "fieldname": "submitted_on",
+   "fieldtype": "Datetime",
+   "in_list_view": 1,
+   "label": "Submitted On",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "collapsible": 1,
+   "collapsible_depends_on": "eval:doc.status=='Failed'",
+   "fieldname": "sb0",
+   "fieldtype": "Section Break",
+   "label": "Failure Detail"
+  },
+  {
+   "fieldname": "error_message",
+   "fieldtype": "Long Text",
+   "label": "Error Message",
+   "read_only": 1
+  }
+ ],
+ "hide_toolbar": 1,
+ "in_create": 1,
+ "modified": "2026-08-22 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "rohit_common",
+ "name": "E-Invoice Submission Log",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 0,
+   "delete": 0,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 0,
+   "write": 0
+  }
+ ],
+ "sort_field": "submitted_on",
+ "sort_order": "DESC",
+ "track_changes": 0
+}

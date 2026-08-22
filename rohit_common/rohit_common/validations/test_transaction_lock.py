@@ -145,6 +145,25 @@ class TestConditionSql(unittest.TestCase):
         self.assertEqual(sql, "`tabSales Invoice`.`docstatus` IS NULL")
 
 
+class TestEInvoiceSubmissionLogRegistration(unittest.TestCase):
+    """T8, docs/designs/gst-asp-migration-whitebooks.md: E-Invoice Submission
+    Log must inherit the view-lock the same way signed_qr_code inherits it
+    via Sales Invoice — these two checks are the actual wiring, not DB
+    fixtures, so they run without a bench (unlike the class below)."""
+
+    def test_e_invoice_submission_log_is_registered(self):
+        self.assertEqual(
+            LOCKED_DOCTYPE_DATE_FIELDS.get("E-Invoice Submission Log"), "submitted_on"
+        )
+
+    def test_generated_permission_query_conditions_function_exists(self):
+        import rohit_common.rohit_common.validations.transaction_lock as tl
+
+        fn = getattr(tl, "get_permission_query_conditions_e_invoice_submission_log", None)
+        self.assertIsNotNone(fn)
+        self.assertTrue(callable(fn))
+
+
 class TestTransactionLockIntegration(unittest.TestCase):
     """
     DB-backed tests for is_locked()/has_permission() against Rohit Settings.

@@ -9,10 +9,12 @@ import requests
 from datetime import datetime
 from pyqrcode import create as qrcreate
 from frappe.utils import get_datetime, flt
+from . import whitebooks_provider
 from .eway_bill_api import get_eway_pass, get_taxes_type, get_transport_mode, get_eway_distance
 from .common import get_base_url, get_aspid_pass, get_default_gstin, get_numeric_state_code, \
     get_gst_pincode, get_gst_based_uom, get_place_of_supply
 TIMEOUT = 10
+WHITEBOOKS_DUPLICATE_IRN_ERROR_CODE = "2150"  # UNVERIFIED — see generate_irn_whitebooks()
 
 
 def generate_eway_irn(dtype, dname):
@@ -129,6 +131,184 @@ def get_headers():
     return {
         "content-type": "application/json"
     }
+
+
+# ---------------------------------------------------------------------------
+# WhiteBooks.in equivalents (T3, docs/designs/gst-asp-migration-whitebooks.md)
+#
+# NOT YET WIRED INTO THE LIVE CALL PATH. generate_irn()/attach_qrcode()/
+# update_irn_details() above remain the production e-invoice path until The
+# Assignment's sandbox handshake (and a real generate-IRN sandbox call)
+# confirm the response shapes assumed below — per Premise 4, cutover means
+# swapping the live call sites AND deleting the Charteredinfo-specific code
+# in the same change, once validated, not before. Reuses gen_einv_json(),
+# get_eway_details(), and update_irn_details() unchanged (Premise 3) — only
+# the HTTP/auth/response-envelope layer below is new.
+#
+# UNVERIFIED RESPONSE SHAPE: WhiteBooks' OpenAPI-documented REST API almost
+# certainly does NOT use Charteredinfo's ad hoc {"Status": "1", "Data": ...,
+# "ErrorDetails": [...]} envelope — this code assumes a conventional REST
+# shape instead (HTTP status code signals success/failure; the IRP-schema
+# fields — Irn/AckNo/AckDt/SignedQRCode, same names update_irn_details()
+# already expects — sit either at the JSON body's top level or under a
+# "data" key). Confirm against a real WhiteBooks sandbox response before
+# trusting this in production; update _parse_generate_irn_response() and
+# WHITEBOOKS_DUPLICATE_IRN_ERROR_CODE to match once confirmed.
+# ---------------------------------------------------------------------------
+
+
+def generate_irn_whitebooks(dtype, dname):
+    """
+    WhiteBooks.in equivalent of generate_irn(). See module note above —
+    the response envelope this parses is an unverified assumption.
+    """
+    einv_json = gen_einv_json(dtype=dtype, dname=dname)
+
+    def _call():
+        return requests.post(
+            url=whitebooks_provider.get_base_url(whitebooks_provider.EINVOICE) + "/generate",
+            headers=whitebooks_provider.get_headers(whitebooks_provider.EINVOICE),
+            data=einv_json,
+            timeout=TIMEOUT,
+        )
+
+    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EINVOICE)
+    _handle_generate_irn_response(dtype, dname, response)
+
+
+def _handle_generate_irn_response(dtype, dname, response):
+    """
+    Parses a generate-IRN response and updates the document, or handles the
+    duplicate-IRN case the same way generate_irn() already does for
+    Charteredinfo (fetch and record the existing IRN instead of treating it
+    as a failure — see the Error Handling / submission-idempotency section
+    of the design doc). Split out from generate_irn_whitebooks() so this is
+    the one function that needs rewriting once the real response shape is
+    confirmed, without touching the request-sending code above it.
+    """
+    if response.status_code == 200:
+        irn_dict = _parse_generate_irn_response(response.json())
+        update_irn_details(dtype, dname, irn_dict)
+        return
+
+    error_code = _extract_whitebooks_error_code(response)
+    if error_code == WHITEBOOKS_DUPLICATE_IRN_ERROR_CODE:
+        irn_dict = get_irn_details_whitebooks_by_doc(dtype, dname)
+        update_irn_details(dtype, dname, irn_dict)
+        return
+
+    frappe.log_error(
+        title="WhiteBooks e-Invoice generation failed",
+        message=f"{dtype} {dname}: HTTP {response.status_code} — {response.text}",
+    )
+    frappe.throw(
+        f"WhiteBooks e-Invoice generation failed for {frappe.get_desk_link(dtype, dname)}: "
+        f"HTTP {response.status_code}"
+    )
+
+
+def _parse_generate_irn_response(res):
+    """Returns the Irn/AckNo/AckDt/SignedQRCode dict from a successful
+    generate-IRN response body. UNVERIFIED shape — see module note."""
+    return res.get("data") or res
+
+
+def _extract_whitebooks_error_code(response):
+    """UNVERIFIED — WhiteBooks' error response shape has not been confirmed.
+    Returns None if the shape doesn't match what's assumed here, which
+    falls through to the generic failure path in
+    _handle_generate_irn_response() rather than silently misinterpreting
+    an unrelated error as a duplicate-IRN case."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return body.get("error_code") or body.get("errorCode")
+
+
+def generate_irn_whitebooks_bulk(dtype, dnames):
+    """
+    T11, docs/designs/gst-asp-migration-whitebooks.md — the backlog/recovery
+    path's true multi-invoice bulk submission (up to 1,000 per call per
+    WhiteBooks' docs). NOT YET WIRED into the live scheduled sweep — see
+    scheduled_tasks/auto_einvoice_tasks.py's
+    make_einvoice_for_docs_whitebooks_bulk(), which calls this but isn't
+    itself in scheduler_events yet.
+
+    UNVERIFIED request/response shape (see module note above
+    generate_irn_whitebooks()): assumes a wrapper object
+    `{"invoices": [...]}` for the request, and
+    `{"rejected": [{"referenceId": ..., "error": ...}, ...]}` for
+    synchronously-rejected invoices in the response — accepted invoices are
+    NOT expected to appear in the response at all; their result arrives
+    later via the webhook (T9), which is why this bulk call needs
+    longer-than-single-call TIMEOUT but returns quickly with just the
+    accept/reject split, not IRNs.
+
+    Deliberately generates the correlation ID client-side
+    (`frappe.generate_hash`) per invoice and embeds it in each invoice's
+    payload as `_referenceId`, rather than trusting WhiteBooks to invent
+    and return a stable ID — a client-generated ID is the more defensive
+    design regardless of which way WhiteBooks' real API actually works, and
+    doubles as the E-Invoice Submission Log's unique `submission_id`.
+
+    Returns (submission_ids, immediate_rejections):
+      submission_ids: {dname: submission_id}, one per invoice, for every
+        invoice in dnames regardless of accept/reject.
+      immediate_rejections: {dname: error_message}, only for invoices the
+        bulk ACK response rejected synchronously — the "partial batch
+        failure" case. Invoices not in this dict were accepted for async
+        processing (their result comes via the webhook).
+    """
+    submission_ids = {dname: frappe.generate_hash(length=20) for dname in dnames}
+    invoices_payload = []
+    for dname in dnames:
+        payload = json.loads(gen_einv_json(dtype, dname))
+        payload["_referenceId"] = submission_ids[dname]  # UNVERIFIED wrapper field
+        invoices_payload.append(payload)
+
+    def _call():
+        return requests.post(
+            url=whitebooks_provider.get_base_url(whitebooks_provider.EINVOICE) + "/bulk-generate",
+            headers=whitebooks_provider.get_headers(whitebooks_provider.EINVOICE),
+            json={"invoices": invoices_payload},
+            timeout=TIMEOUT * 10,
+        )
+
+    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EINVOICE)
+    response.raise_for_status()
+    body = response.json()
+
+    ref_id_to_dname = {sid: dname for dname, sid in submission_ids.items()}
+    immediate_rejections = {}
+    for rejection in body.get("rejected", []):
+        dname = ref_id_to_dname.get(rejection.get("referenceId"))
+        if dname:
+            immediate_rejections[dname] = rejection.get("error") or "rejected by WhiteBooks bulk endpoint"
+
+    return submission_ids, immediate_rejections
+
+
+def get_irn_details_whitebooks_by_doc(dtype, dname):
+    """
+    WhiteBooks.in equivalent of get_irn_details() — looks up an existing
+    IRN by document number rather than by IRN, for the duplicate-IRN retry
+    path. UNVERIFIED endpoint path and response shape — WhiteBooks' docs
+    mention a "Lookup IRN by document number" endpoint (confirmed via
+    WebSearch, 2026-08-22) but the exact path/params were not in the pages
+    fetched during that search.
+    """
+    def _call():
+        return requests.get(
+            url=whitebooks_provider.get_base_url(whitebooks_provider.EINVOICE) + "/lookup",
+            headers=whitebooks_provider.get_headers(whitebooks_provider.EINVOICE),
+            params={"docNo": dname},
+            timeout=TIMEOUT,
+        )
+
+    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EINVOICE)
+    response.raise_for_status()
+    return _parse_generate_irn_response(response.json())
 
 
 

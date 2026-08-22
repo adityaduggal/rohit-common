@@ -29,6 +29,11 @@ LOCKED_DOCTYPE_DATE_FIELDS = {
     "Quotation": "transaction_date",
     "Sales Order": "transaction_date",
     "Purchase Order": "transaction_date",
+    # T8, docs/designs/gst-asp-migration-whitebooks.md: holds the same class
+    # of GST submission data as signed_qr_code (Sales Invoice), so it
+    # inherits the same read restriction rather than being a side door
+    # around it.
+    "E-Invoice Submission Log": "submitted_on",
 }
 
 # "field op value" — the only grammar accepted for
@@ -310,7 +315,13 @@ def get_voucher_type_lock_condition(sle_alias, voucher_type_field, date_field, u
 
 
 for _doctype in LOCKED_DOCTYPE_DATE_FIELDS:
-    _slug = _doctype.lower().replace(" ", "_")
+    # Also replaces "-" (not just " ") so a doctype like "E-Invoice
+    # Submission Log" gets a normal-looking identifier
+    # (get_permission_query_conditions_e_invoice_submission_log) instead of
+    # a hyphenated one. Frappe resolves these via a plain getattr, which
+    # works with a hyphen in the name too, but there's no reason to rely on
+    # that — a real identifier is what hooks.py should reference.
+    _slug = _doctype.lower().replace(" ", "_").replace("-", "_")
     globals()[f"get_permission_query_conditions_{_slug}"] = (
         _make_permission_query_conditions(_doctype)
     )

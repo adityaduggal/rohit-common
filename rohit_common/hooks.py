@@ -92,6 +92,7 @@ permission_query_conditions = {
     "Quotation": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_quotation",
     "Sales Order": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_sales_order",
     "Purchase Order": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_purchase_order",
+    "E-Invoice Submission Log": f"{_TRANSACTION_LOCK_MODULE}.get_permission_query_conditions_e_invoice_submission_log",
 }
 has_permission = {
      "File": "rohit_common.core.file.custom_file_permissions",
@@ -107,6 +108,7 @@ has_permission = {
      "Quotation": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
      "Sales Order": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
      "Purchase Order": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
+     "E-Invoice Submission Log": f"{_TRANSACTION_LOCK_MODULE}.has_permission",
 }
 
 # Javascripts for Standard Documents to Override Forms Script
@@ -157,7 +159,15 @@ doc_events = {
     "Sales Invoice": {
         "validate": "rohit_common.rohit_common.validations.sales_invoice.validate",
         "on_update_after_submit": "rohit_common.rohit_common.validations.sales_invoice.on_update",
-        "on_submit": "rohit_common.rohit_common.validations.sales_invoice.on_submit",
+        # List, not a single string: both handlers run on submit. T10,
+        # docs/designs/gst-asp-migration-whitebooks.md — the WhiteBooks
+        # live-path e-invoice hook is new here (no on_submit e-invoice
+        # trigger existed before; the previous mechanism was a 15-minute
+        # cron sweep, not a submit hook).
+        "on_submit": [
+            "rohit_common.rohit_common.validations.sales_invoice.on_submit",
+            "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.queue_live_einvoice_submission",
+        ],
     },
     "Sales Taxes and Charges Template": {
         "validate": "rohit_common.rohit_common.validations.stc_template.validate"
@@ -190,6 +200,11 @@ scheduler_events = {
         "*/15 * * * *": [
             "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.enq_inv_sub",
             "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.enq_einv_create",
+        ],
+        # T12, docs/designs/gst-asp-migration-whitebooks.md — alert on stuck
+        # backlog-path WhiteBooks e-invoice submissions.
+        "*/5 * * * *": [
+            "rohit_common.rohit_common.scheduled_tasks.alert_stuck_einvoice_submissions.execute",
         ],
     },
     "all": [

@@ -47,7 +47,26 @@
   "asp_private_key_path",
   "sb7",
   "transaction_lock_bypass_role",
-  "locked_doctypes"
+  "locked_doctypes",
+  "sb8",
+  "whitebooks_einv_client_id",
+  "whitebooks_einv_client_secret",
+  "whitebooks_einv_sandbox_client_id",
+  "whitebooks_einv_sandbox_client_secret",
+  "cb8_1",
+  "whitebooks_gst_client_id",
+  "whitebooks_gst_client_secret",
+  "whitebooks_gst_sandbox_client_id",
+  "whitebooks_gst_sandbox_client_secret",
+  "cb8_2",
+  "whitebooks_eway_client_id",
+  "whitebooks_eway_client_secret",
+  "whitebooks_eway_sandbox_client_id",
+  "whitebooks_eway_sandbox_client_secret",
+  "sb9",
+  "whitebooks_webhook_secret",
+  "cb9",
+  "whitebooks_webhook_ip_allowlist"
  ],
  "fields": [
   {
@@ -303,10 +322,108 @@
    "fieldtype": "Table",
    "label": "Locked Doctypes",
    "options": "Global Search DocType"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "sb8",
+   "fieldtype": "Section Break",
+   "label": "WhiteBooks GSP",
+   "description": "WhiteBooks issues a separate OAuth2 client_id/client_secret pair per API product (e-Invoice, Public GST, e-Way Bill), each with its own sandbox/production pair. Which pair is used is selected by the shared Sandbox Mode checkbox above (reused, not duplicated per family)."
+  },
+  {
+   "fieldname": "whitebooks_einv_client_id",
+   "fieldtype": "Data",
+   "label": "e-Invoice Client ID"
+  },
+  {
+   "fieldname": "whitebooks_einv_client_secret",
+   "fieldtype": "Password",
+   "label": "e-Invoice Client Secret"
+  },
+  {
+   "fieldname": "whitebooks_einv_sandbox_client_id",
+   "fieldtype": "Data",
+   "label": "e-Invoice Sandbox Client ID"
+  },
+  {
+   "fieldname": "whitebooks_einv_sandbox_client_secret",
+   "fieldtype": "Password",
+   "label": "e-Invoice Sandbox Client Secret"
+  },
+  {
+   "fieldname": "cb8_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "whitebooks_gst_client_id",
+   "fieldtype": "Data",
+   "label": "Public GST API Client ID"
+  },
+  {
+   "fieldname": "whitebooks_gst_client_secret",
+   "fieldtype": "Password",
+   "label": "Public GST API Client Secret"
+  },
+  {
+   "fieldname": "whitebooks_gst_sandbox_client_id",
+   "fieldtype": "Data",
+   "label": "Public GST API Sandbox Client ID"
+  },
+  {
+   "fieldname": "whitebooks_gst_sandbox_client_secret",
+   "fieldtype": "Password",
+   "label": "Public GST API Sandbox Client Secret"
+  },
+  {
+   "fieldname": "cb8_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "whitebooks_eway_client_id",
+   "fieldtype": "Data",
+   "label": "e-Way Bill Client ID"
+  },
+  {
+   "fieldname": "whitebooks_eway_client_secret",
+   "fieldtype": "Password",
+   "label": "e-Way Bill Client Secret"
+  },
+  {
+   "fieldname": "whitebooks_eway_sandbox_client_id",
+   "fieldtype": "Data",
+   "label": "e-Way Bill Sandbox Client ID"
+  },
+  {
+   "fieldname": "whitebooks_eway_sandbox_client_secret",
+   "fieldtype": "Password",
+   "label": "e-Way Bill Sandbox Client Secret"
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "sb9",
+   "fieldtype": "Section Break",
+   "label": "WhiteBooks Webhook (T9)",
+   "description": "Inbound webhook auth for india_gst_api/webhook.py. Signature mechanism assumed here (HMAC-SHA256 of the raw body, hex-encoded, in a header) is UNVERIFIED against WhiteBooks' actual docs - see the module docstring. Do not register this endpoint's URL with WhiteBooks until that's confirmed."
+  },
+  {
+   "description": "Shared secret used to verify the HMAC signature on inbound webhook calls. Leave blank and the webhook rejects every request (fails closed, not open) - see webhook.py.",
+   "fieldname": "whitebooks_webhook_secret",
+   "fieldtype": "Password",
+   "label": "Webhook Signing Secret"
+  },
+  {
+   "fieldname": "cb9",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Comma-separated IP allowlist for the webhook endpoint, defense-in-depth alongside signature verification. Left blank, IP checking is not enforced (WhiteBooks has not published source IPs to allowlist as of 2026-08-22) - signature verification remains the primary control either way.",
+   "fieldname": "whitebooks_webhook_ip_allowlist",
+   "fieldtype": "Data",
+   "label": "Webhook IP Allowlist"
   }
  ],
  "issingle": 1,
- "modified": "2022-08-08 09:37:52.222305",
+ "modified": "2026-08-22 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "Rohit Settings",
