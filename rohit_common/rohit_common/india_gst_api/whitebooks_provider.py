@@ -2,9 +2,10 @@
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
 """
-WhiteBooks.in GSP provider — implements gsp_provider.GSPProvider.
+WhiteBooks.in GSP provider.
 
-Replaces gsp_session.py's TaxPro/Charteredinfo cert-based session auth and
+Replaces gsp_session.py's TaxPro/Charteredinfo cert-based session auth
+(deleted 2026-08-22 once the Public GST family was verified end to end) and
 einv.py/eway_bill_api.py's ASP-ID+password headers with an OAuth2
 client_credentials flow per docs/designs/gst-asp-migration-whitebooks.md,
 Premise 2. **Revised 2026-08-22**: WhiteBooks issues a SEPARATE client_id/
@@ -205,11 +206,10 @@ def get_registered_email(api_name):
 
 def refresh_session(api_name=None):
     """Drop the cached token for the named family — call after a 401/
-    expired-token response, then retry the request once. Mirrors
-    gsp_session.invalidate_session(). api_name is required for the
-    per-family cache; kept as a defaulted kwarg only so this still matches
-    gsp_provider.GSPProvider's zero-arg refresh_session() signature — call
-    sites in this module always pass api_name explicitly."""
+    expired-token response, then retry the request once. api_name is
+    required for the per-family cache; kept as a defaulted kwarg only for a
+    zero-arg call shape — call sites in this module always pass api_name
+    explicitly."""
     if api_name is None:
         frappe.throw("whitebooks_provider.refresh_session() requires api_name")
     _validate_api_name(api_name)

@@ -788,6 +788,24 @@ finding above. Run with Claude Code or Codex; checkbox as you ship.
     still unconfirmed — this Postman collection doesn't cover them; may or
     may not also turn out to need this same static-header (not OAuth2)
     treatment.
+  - **2026-08-22, T4 fully closed**: user confirmed a real production-mode
+    `search_gstin_whitebooks()` call returned a success response end to
+    end. Charteredinfo/TaxPro's Public GST path (`gsp_session.py`,
+    `gsp_provider.py`, the old `search_gstin()`/`track_return()`/
+    `_get_with_session_retry()` in `gst_public_api.py`, their tests
+    `test_gsp_session.py`/`test_gst_public_api.py`,
+    `docs/taxpro-asp-cert-setup.md`, and the orphaned one-off patch
+    `20201015_update_address_title_from_gst.py` which imported
+    `search_gstin` but was never wired into `patches.txt`) is deleted.
+    `Rohit Settings.asp_private_key_path` (exclusive to `gsp_session.py`)
+    and its "TaxPro GSP Public API Auth" section are removed;
+    `tax_pro_asp_id`/`tax_pro_password` are kept — still used by
+    `common.py`'s `get_aspid_pass()` for the still-live Charteredinfo
+    e-Invoice/e-Way Bill paths. Callers `gst_return_status.py` and
+    `gstr1_return_rigpl.py` (both used `track_return()` for GSTR1 ARN
+    lookups, unrelated to the Address validation path) switched to
+    `track_return_whitebooks()`. 140 tests passing on the real bench after
+    the removal + a `bench migrate`.
 - [x] **T5-PARTIAL (P2, human: ~3 hrs / CC: ~20 min)** — india_gst_api — Build (not yet cut over) WhiteBooks e-Way Bill plumbing
   - Surfaced by: Premise 1 priority order, cross-model tension 4 (kept in scope)
   - Files: `india_gst_api/eway_bill_api.py` (new: `generate_ewb_whitebooks()`,

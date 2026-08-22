@@ -16,7 +16,7 @@ from ....utils.accounts_utils import get_base_doc_no, get_taxes_from_sid, get_gs
     get_invoice_uploader, guess_correct_address, get_base_doc_frm_docname
 from ...india_gst_api.common import gst_return_period_validation, get_dates_from_return_period
 from ...india_gst_api.gst_api import get_gstr1
-from ...india_gst_api.gst_public_api import track_return, get_arn_status
+from ...india_gst_api.gst_public_api import track_return_whitebooks, get_arn_status
 
 gstr1_actions = [
     {"action": "AT", "name": "Advances Tax", "tbl": "at_invoices"},
@@ -58,7 +58,7 @@ class GSTR1ReturnRIGPL(Document):
         if not self.arn_number:
             # If GSTR1 is not Filed then Check if Filed and if Filed then get the ARN and other details and verify
             # from GST Network
-            return_status = track_return(gstin=self.gstin, fiscal_year=fy[0], type_of_return="R1")
+            return_status = track_return_whitebooks(gstin=self.gstin, fiscal_year=fy[0], type_of_return="R1")
             self.arn_number, self.filing_status, self.filing_date, self.mode_of_filing = \
                 get_arn_status(ret_status_json=return_status, type_of_return="GSTR1", ret_period=self.return_period)
             if not self.arn_number:

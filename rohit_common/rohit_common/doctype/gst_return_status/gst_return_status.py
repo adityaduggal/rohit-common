@@ -7,7 +7,7 @@ import frappe
 import json
 from datetime import datetime
 from frappe.utils.data import getdate
-from ...india_gst_api.gst_public_api import track_return
+from ...india_gst_api.gst_public_api import track_return_whitebooks
 from frappe.model.document import Document
 from erpnext.accounts.utils import get_fiscal_year
 
@@ -24,7 +24,7 @@ class GSTReturnStatus(Document):
 				frappe.throw('Selected FY {} is before the GST Era'.format(tup[0]))
 			elif tup[1] > today.date():
 				frappe.throw('Selected FY {} has not Even Started'.format(tup[0]))
-		response = track_return(self.gstin, self.fiscal_year)
+		response = track_return_whitebooks(self.gstin, self.fiscal_year)
 		efiled_list = response.get('EFiledlist')
 		# frappe.throw(str(efiled_list))
 		if efiled_list:
