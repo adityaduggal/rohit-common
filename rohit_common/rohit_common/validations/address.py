@@ -355,23 +355,33 @@ def validate_gstin_from_portal(doc, auto_days=None):
         # Cutover (T4/Premise 4, docs/designs/gst-asp-migration-whitebooks.md):
         # live call switched from TaxPro (search_gstin/gsp_session.py, whose
         # AES key-derivation assumption was failing PKCS7 unpadding) to
-        # WhiteBooks (search_gstin_whitebooks). Field mapping below
-        # (status_cd/gstin/sts) is the TaxPro/GSTN shape carried over
-        # unverified per Premise 3 (vendors pass through the GSTN schema) —
-        # doc.gstin_json_reply always stores the raw response so a live
-        # sandbox call can be inspected and this mapping corrected if
-        # WhiteBooks' actual field names differ.
+        # WhiteBooks (search_gstin_whitebooks). doc.gstin_json_reply always
+        # stores the raw response for inspection.
+        #
+        # Confirmed 2026-08-22 from a real sandbox response: status_cd is a
+        # STRING and is present on both outcomes ("1" success / "0" failure,
+        # standard GSTN Search Taxpayer convention that GSPs pass through
+        # per Premise 3) - checking truthiness of its presence (the original
+        # TaxPro-era `if not gstin_json.get("status_cd")`) was wrong and
+        # would have misfired success as failure. gstin/sts field names on
+        # a success body are still unconfirmed (no 200 example seen yet) but
+        # assumed unchanged, since that part of the shape is the same GSTN
+        # schema the failure body's status_cd convention came from.
         gstin_json = search_gstin_whitebooks(doc.gstin)
         doc.gstin_json_reply = str(gstin_json)
-        if not gstin_json.get("status_cd"):
+        if gstin_json.get("status_cd") == "1":
             doc.validated_gstin = gstin_json.get("gstin")
             doc.gst_status = gstin_json.get("sts")
             doc.gst_validation_date = date.today()
         else:
             # Was `exit()` (kills the worker process, not just this call) -
-            # fixed to a plain return so a bad status code just aborts this
+            # fixed to a plain return so a failed lookup just aborts this
             # validation instead of taking down the request/job.
-            frappe.msgprint("Status Code Return is Zero Hence Exiting")
+            error = gstin_json.get("error") or {}
+            frappe.msgprint(
+                f"GSTIN validation failed for {doc.gstin}: "
+                f"{error.get('errorMessage') or gstin_json.get('status_desc') or gstin_json}"
+            )
             return
     if doc.gst_status in ('Inactive', 'Cancelled'):
         doc.disabled = 1
