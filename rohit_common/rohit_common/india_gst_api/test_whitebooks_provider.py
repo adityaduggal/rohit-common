@@ -67,6 +67,14 @@ class TestGetBaseUrl(unittest.TestCase):
         self.assertEqual(wb.get_base_url(wb.EWAY), "https://api.whitebooks.in/eway")
 
     @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    def test_public_gst_has_no_family_path_prefix(self, mock_frappe):
+        """Confirmed 2026-08-22 via WhiteBooks' GST-API Postman collection:
+        PUBLIC_GST paths (/public/search etc.) are rooted, not under /gst -
+        the earlier /oauth/token 404 traced back to this being wrong."""
+        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
+        self.assertEqual(wb.get_base_url(wb.PUBLIC_GST), "https://apisandbox.whitebooks.in")
+
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
     def test_each_family_has_a_distinct_path(self, mock_frappe):
         mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
         urls = {api: wb.get_base_url(api) for api in wb.API_FAMILIES}
@@ -248,6 +256,49 @@ class TestGetHeaders(unittest.TestCase):
             mock_frappe.throw.side_effect = frappe_throw_side_effect
             with self.assertRaises(RuntimeError):
                 wb.get_headers("not-a-real-family")
+
+
+class TestGetStaticClientHeaders(unittest.TestCase):
+    """PUBLIC_GST (confirmed 2026-08-22 via WhiteBooks' GST-API Postman
+    collection) sends client_id/client_secret as headers directly - no
+    OAuth2 token endpoint exists for this family."""
+
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    def test_returns_client_id_and_secret_as_headers(self, mock_frappe):
+        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
+
+        headers = wb.get_static_client_headers(wb.PUBLIC_GST)
+
+        self.assertEqual(headers, {
+            "client_id": "gst-sandbox-id",
+            "client_secret": "secret-for-whitebooks_gst_sandbox_client_secret",
+        })
+
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    def test_uses_production_credentials_when_not_sandbox(self, mock_frappe):
+        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
+
+        headers = wb.get_static_client_headers(wb.PUBLIC_GST)
+
+        self.assertEqual(headers["client_id"], "gst-prod-id")
+
+
+class TestGetRegisteredEmail(unittest.TestCase):
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    def test_returns_configured_email(self, mock_frappe):
+        mock_frappe.get_single.return_value = _fake_settings(
+            whitebooks_gst_email="gsp@rigpl.com"
+        )
+
+        self.assertEqual(wb.get_registered_email(wb.PUBLIC_GST), "gsp@rigpl.com")
+
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    def test_throws_when_email_not_configured(self, mock_frappe):
+        mock_frappe.get_single.return_value = _fake_settings(whitebooks_gst_email=None)
+        mock_frappe.throw.side_effect = frappe_throw_side_effect
+
+        with self.assertRaises(RuntimeError):
+            wb.get_registered_email(wb.PUBLIC_GST)
 
 
 class TestRefreshSession(unittest.TestCase):

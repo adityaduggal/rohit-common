@@ -747,29 +747,47 @@ finding above. Run with Claude Code or Codex; checkbox as you ship.
     shape, then wire generate_irn_whitebooks() into the live call sites and
     delete the Charteredinfo-specific einv.py code in the same change
     (Premise 4's actual cutover step) — not done yet, intentionally.
-- [x] **T4-PARTIAL (P2, human: ~3 hrs / CC: ~20 min)** — india_gst_api — Build (not yet cut over) WhiteBooks Public GST API path
+- [x] **T4 (P2, human: ~3 hrs / CC: ~20 min)** — india_gst_api — WhiteBooks Public GST API path, cut over live for sandbox testing
   - Surfaced by: Premise 1 priority order
-  - Files: `india_gst_api/gst_public_api.py` (new: `search_gstin_whitebooks()`,
-    `track_return_whitebooks()` — added alongside the existing broken
-    Charteredinfo functions, NOT wired into the live call path,
-    `gsp_session.py` NOT deleted yet — same per-family sequencing as T3),
-    `india_gst_api/test_whitebooks_public_api.py` (6 new tests, all passing)
-  - Verify: request-wiring tests pass (base URL, headers, params, retry
-    family). `get_arn_status()` (the vendor-agnostic response parser, reused
-    unchanged) confirmed to still work against the assumed WhiteBooks
-    response shape via `test_response_still_parses_via_get_arn_status`.
-    Endpoint paths (`/gstin-search`, `/return-track`) and the assumption
-    that WhiteBooks' return-tracking response reuses the same `EFiledlist`
-    shape are both flagged UNVERIFIED in the module note above the new
-    functions — WhiteBooks' Public GST API docs describe capabilities
-    (GSTIN verification, HSN/SAC lookup) but not exact paths. Since
-    `search_gstin()`/`track_return()` are the two calls currently BROKEN in
-    production (per Status Quo), this is genuinely a fix waiting on sandbox
-    verification, not just a swap of working code. Remaining for full T4:
-    sandbox-verify the response shape and endpoint paths, wire the
-    WhiteBooks functions into the live call sites, delete `gsp_session.py`
-    and the Charteredinfo-specific code in `gst_public_api.py` in the same
-    change (Premise 4's cutover step) — not done yet, intentionally.
+  - **2026-08-22 update — real sandbox call + real WhiteBooks docs, two
+    corrections to the original OAuth2 assumption:**
+    1. Live sandbox call to the OAuth2 flow returned
+       `{'status_cd': '0', 'status_desc': 'No API configured for :/oauth/token'}`
+       — PUBLIC_GST has **no OAuth2 token endpoint at all**.
+    2. The user supplied WhiteBooks' actual "GST-API" Postman collection
+       (covers Public GST + GST-returns-filing only, not e-Invoice IRN
+       generation or e-Way Bill). It confirms: every `/public/*` call sends
+       `client_id`/`client_secret` directly as request headers (no bearer
+       token), plus a registered account `email` query param; endpoint
+       paths are rooted (`/public/search`, `/public/rettrack`), not under a
+       `/gst` prefix as originally guessed.
+  - Files: `whitebooks_provider.py` (new: `get_static_client_headers()`,
+    `get_registered_email()` — bypass the OAuth2 token machinery entirely
+    for PUBLIC_GST; `_API_PATHS[PUBLIC_GST]` fixed from `/gst` to `""`),
+    `gst_public_api.py` (`search_gstin_whitebooks()`/`track_return_whitebooks()`
+    rewritten to hit `/public/search`/`/public/rettrack` with static headers
+    + `email` param instead of the old OAuth2 `call_with_token_retry()`
+    path), `rohit_settings.json` (new `whitebooks_gst_email` field),
+    `validations/address.py` (`validate_gstin_from_portal()` **cut over
+    live** to `search_gstin_whitebooks()` — ahead of the general
+    "wait until verified" rule, since TaxPro's `gsp_session.py` decrypt was
+    already broken and blocking testing; also fixed a real bug in the same
+    function — a bare `exit()` that would kill the whole worker process on
+    a bad status code, changed to `return`; `gsp_session.py`/`search_gstin()`
+    left in place, not deleted, for rollback), `test_whitebooks_public_api.py`
+    (rewritten for the new auth model, 6 tests), `test_whitebooks_provider.py`
+    (5 new tests for the two new functions + the fixed base path)
+  - Verify: 32 tests passing on the real bench (26 + 6). Endpoint **response
+    body** shape (what `/public/search`/`/public/rettrack` actually return)
+    is still UNVERIFIED — the Postman collection has no example 200 bodies,
+    only 404/500. `doc.gstin_json_reply` now always stores the raw response
+    (even on the "bad status_cd" branch) so the next live call's actual
+    shape can be inspected and the `status_cd`/`gstin`/`sts` field mapping
+    corrected if WhiteBooks' names differ from the carried-over TaxPro/GSTN
+    ones. e-Invoice IRN generation and e-Way Bill families' auth model is
+    still unconfirmed — this Postman collection doesn't cover them; may or
+    may not also turn out to need this same static-header (not OAuth2)
+    treatment.
 - [x] **T5-PARTIAL (P2, human: ~3 hrs / CC: ~20 min)** — india_gst_api — Build (not yet cut over) WhiteBooks e-Way Bill plumbing
   - Surfaced by: Premise 1 priority order, cross-model tension 4 (kept in scope)
   - Files: `india_gst_api/eway_bill_api.py` (new: `generate_ewb_whitebooks()`,

@@ -7,12 +7,18 @@ designs/gst-asp-migration-whitebooks.md) — request wiring only, mocked
 (frappe, requests, whitebooks_provider), no live site or WhiteBooks
 credentials required.
 
-The response shape these functions return is an UNVERIFIED ASSUMPTION (see
-the module note in gst_public_api.py above search_gstin_whitebooks()) — these
-tests prove the request is built correctly and the raw JSON response is
-returned as-is; they do not prove WhiteBooks' actual response matches what
-get_arn_status() expects. That needs a real WhiteBooks sandbox call (The
-Assignment).
+Auth model confirmed 2026-08-22 against WhiteBooks' "GST-API" Postman
+collection: PUBLIC_GST has no OAuth2 token endpoint at all — every call
+sends client_id/client_secret directly as headers (whitebooks_provider.
+get_static_client_headers()) plus a registered email query param
+(whitebooks_provider.get_registered_email()). Endpoint paths confirmed as
+/public/search and /public/rettrack (rooted, no /gst prefix).
+
+Response *body* shape is still an UNVERIFIED ASSUMPTION (see the module
+note in gst_public_api.py above search_gstin_whitebooks()) — these tests
+prove the request is built correctly and the raw JSON response is returned
+as-is; they do not prove WhiteBooks' actual response matches what
+get_arn_status() expects. That needs a real WhiteBooks sandbox call.
 
 Run: <bench-root>/env/bin/python -m pytest rohit_common/rohit_common/india_gst_api/test_whitebooks_public_api.py -v
 """
@@ -31,18 +37,25 @@ def _fake_response(status_code=200, json_body=None):
     return resp
 
 
+def _configure_wb(mock_wb):
+    mock_wb.PUBLIC_GST = "gst"
+    mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in"
+    mock_wb.get_static_client_headers.return_value = {
+        "client_id": "cid",
+        "client_secret": "csecret",
+    }
+    mock_wb.get_registered_email.return_value = "gsp@rigpl.com"
+
+
 class TestSearchGstinWhitebooks(unittest.TestCase):
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.frappe")
-    def test_builds_request_with_caller_gstin_headers_and_base_url(
+    def test_builds_request_with_static_headers_email_and_gstin(
         self, mock_frappe, mock_requests, mock_wb
     ):
         mock_frappe.get_single.return_value = SimpleNamespace(gstin="06AAACR1567J1ZC")
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/gst"
-        mock_wb.get_headers.return_value = {"Authorization": "Bearer tok"}
-        mock_wb.PUBLIC_GST = "gst"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
+        _configure_wb(mock_wb)
         mock_requests.get.return_value = _fake_response(
             200, {"gstin": "27AAACT2727Q1ZW", "sts": "Active"}
         )
@@ -51,72 +64,71 @@ class TestSearchGstinWhitebooks(unittest.TestCase):
 
         self.assertEqual(result["sts"], "Active")
         called_url = mock_requests.get.call_args.kwargs["url"]
-        self.assertTrue(called_url.endswith("/gstin-search"))
-        self.assertEqual(mock_requests.get.call_args.kwargs["params"], {"gstin": "27AAACT2727Q1ZW"})
-        self.assertEqual(mock_requests.get.call_args.kwargs["headers"]["Authorization"], "Bearer tok")
+        self.assertTrue(called_url.endswith("/public/search"))
+        self.assertEqual(
+            mock_requests.get.call_args.kwargs["params"],
+            {"email": "gsp@rigpl.com", "gstin": "27AAACT2727Q1ZW"},
+        )
+        self.assertEqual(
+            mock_requests.get.call_args.kwargs["headers"],
+            {"client_id": "cid", "client_secret": "csecret"},
+        )
 
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.frappe")
     def test_defaults_to_caller_gstin_when_none_given(self, mock_frappe, mock_requests, mock_wb):
         mock_frappe.get_single.return_value = SimpleNamespace(gstin="06AAACR1567J1ZC")
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/gst"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.PUBLIC_GST = "gst"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
+        _configure_wb(mock_wb)
         mock_requests.get.return_value = _fake_response(200, {})
 
         gst_public_api.search_gstin_whitebooks(None)
 
         self.assertEqual(
-            mock_requests.get.call_args.kwargs["params"], {"gstin": "06AAACR1567J1ZC"}
+            mock_requests.get.call_args.kwargs["params"]["gstin"], "06AAACR1567J1ZC"
         )
 
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.frappe")
-    def test_uses_call_with_token_retry_for_the_public_gst_family(
-        self, mock_frappe, mock_requests, mock_wb
-    ):
+    def test_does_not_use_oauth2_token_machinery(self, mock_frappe, mock_requests, mock_wb):
+        """PUBLIC_GST has no token endpoint - confirms this call path never
+        touches get_headers()/get_token()/call_with_token_retry()."""
         mock_frappe.get_single.return_value = SimpleNamespace(gstin="06AAACR1567J1ZC")
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/gst"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.PUBLIC_GST = "gst"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
+        _configure_wb(mock_wb)
         mock_requests.get.return_value = _fake_response(200, {})
 
         gst_public_api.search_gstin_whitebooks("27AAACT2727Q1ZW")
 
-        args, kwargs = mock_wb.call_with_token_retry.call_args
-        self.assertEqual(args[1], "gst")
+        mock_wb.get_headers.assert_not_called()
+        mock_wb.get_token.assert_not_called()
+        mock_wb.call_with_token_retry.assert_not_called()
+        mock_wb.get_static_client_headers.assert_called_once_with("gst")
 
 
 class TestTrackReturnWhitebooks(unittest.TestCase):
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
-    def test_builds_request_with_gstin_and_formatted_fiscal_year(self, mock_requests, mock_wb):
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/gst"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.PUBLIC_GST = "gst"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
+    def test_builds_request_with_gstin_email_and_formatted_fiscal_year(
+        self, mock_requests, mock_wb
+    ):
+        _configure_wb(mock_wb)
         mock_requests.get.return_value = _fake_response(200, {"EFiledlist": []})
 
         gst_public_api.track_return_whitebooks("27AAACT2727Q1ZW", "2017-2018")
 
         called_url = mock_requests.get.call_args.kwargs["url"]
-        self.assertTrue(called_url.endswith("/return-track"))
+        self.assertTrue(called_url.endswith("/public/rettrack"))
         params = mock_requests.get.call_args.kwargs["params"]
         self.assertEqual(params["gstin"], "27AAACT2727Q1ZW")
         self.assertEqual(params["fy"], "2017-18")
+        self.assertEqual(params["email"], "gsp@rigpl.com")
         self.assertNotIn("type", params)
 
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
     def test_includes_type_of_return_when_given(self, mock_requests, mock_wb):
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/gst"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.PUBLIC_GST = "gst"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
+        _configure_wb(mock_wb)
         mock_requests.get.return_value = _fake_response(200, {"EFiledlist": []})
 
         gst_public_api.track_return_whitebooks("27AAACT2727Q1ZW", "2017-2018", type_of_return="R1")
@@ -132,10 +144,7 @@ class TestTrackReturnWhitebooks(unittest.TestCase):
         agnostic, reused unchanged) must still work against whatever
         track_return_whitebooks() returns — same EFiledlist shape."""
         mock_getdate.side_effect = lambda v: v
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/gst"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.PUBLIC_GST = "gst"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
+        _configure_wb(mock_wb)
         mock_requests.get.return_value = _fake_response(
             200,
             {"EFiledlist": [{"rtntype": "R1", "ret_prd": "072026", "arn": "ARN123",

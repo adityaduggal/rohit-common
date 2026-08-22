@@ -16,19 +16,34 @@ credentials — and therefore the cached token — are per-family. The shared
 `Rohit Settings.sandbox_mode` checkbox still selects environment for all
 three, reused rather than duplicated per family.
 
-UNVERIFIED ASSUMPTIONS (see The Assignment in the design doc — a sandbox
-auth handshake must confirm these before this module is trusted in
-production):
+CONFIRMED 2026-08-22 (WhiteBooks' "GST-API" Postman collection, provided by
+the user — covers the Public GST + GST-returns-filing product only):
+PUBLIC_GST does **not** use OAuth2 at all. There is no token endpoint for
+this family — every call sends `client_id`/`client_secret` directly as
+request headers (see `get_static_client_headers()` below), plus a
+registered account `email` as a query param (`Rohit Settings.
+whitebooks_gst_email`). The `/oauth/token` 404 the live sandbox returned
+("No API configured for :/oauth/token") is exactly this — PUBLIC_GST was
+wrongly being routed through the OAuth2 flow below. get_headers()/get_token()
+must NOT be used for PUBLIC_GST; call sites use get_static_client_headers()
+instead. Base URL confirmed as apisandbox.whitebooks.in/api.whitebooks.in
+(same host as the other families) but with NO per-family path prefix —
+paths are rooted directly (e.g. `/public/search`, not `/gst/public/search`).
+
+UNVERIFIED ASSUMPTIONS for EINVOICE and EWAY (see The Assignment in the
+design doc — a sandbox auth handshake must confirm these before this module
+is trusted in production for those two families; the Postman collection
+above only covers PUBLIC_GST, not e-Invoice IRN generation or e-Way Bill):
 1. Token endpoint path and grant_type/client_id/client_secret payload shape
    below follow the standard OAuth2 client_credentials convention. WhiteBooks'
    public docs describe OAuth2 bearer-token auth (confirmed via WebSearch,
    2026-08-22) but the exact token endpoint path was not in the pages
-   fetched during that search.
+   fetched during that search. Given PUBLIC_GST turned out to use no OAuth2
+   at all, treat this as genuinely unverified, not just unconfirmed detail —
+   EINVOICE/EWAY may turn out to be static-header auth too.
 2. Base URLs for the e-Invoice and e-Way Bill families are confirmed from
    WhiteBooks' own developer-portal pages (sandbox: apisandbox.whitebooks.in,
-   production: api.whitebooks.in). The Public GST API family's base URL
-   follows the same host pattern but was not individually confirmed — verify
-   against WhiteBooks' GST API docs before using PUBLIC_GST in production.
+   production: api.whitebooks.in).
 3. Whether each API family's token endpoint lives under that family's own
    path (e.g. .../einvoice/oauth/token) or a shared host-level path
    (.../oauth/token, disambiguated only by which client_id is presented) is
@@ -55,7 +70,7 @@ _PRODUCTION_HOST = "https://api.whitebooks.in"
 _API_PATHS = {
     EINVOICE: "/einvoice",
     EWAY: "/eway",
-    PUBLIC_GST: "/gst",  # unverified — see module docstring, assumption 2
+    PUBLIC_GST: "",  # confirmed 2026-08-22 — paths are rooted (/public/search), no /gst prefix
 }
 # Per-family Rohit Settings fieldname prefixes (whitebooks_<prefix>_client_id,
 # ..._client_secret, ..._sandbox_client_id, ..._sandbox_client_secret).
@@ -160,6 +175,32 @@ def get_headers(api_name):
         "Authorization": f"{token['token_type']} {token['access_token']}",
         "Content-Type": "application/json",
     }
+
+
+def get_static_client_headers(api_name):
+    """Auth headers for API families that send client_id/client_secret
+    directly on every call instead of exchanging them for an OAuth2 bearer
+    token — confirmed 2026-08-22 for PUBLIC_GST via WhiteBooks' GST-API
+    Postman collection (no /oauth/token endpoint exists for this family).
+    Do not use get_headers()/get_token() for PUBLIC_GST."""
+    rset = _get_settings()
+    client_id, client_secret = _get_client_credentials(rset, api_name)
+    return {"client_id": client_id, "client_secret": client_secret}
+
+
+def get_registered_email(api_name):
+    """The WhiteBooks account email registered against a family's
+    client_id/client_secret — required as a query param on every PUBLIC_GST
+    call (Rohit Settings.whitebooks_gst_email)."""
+    prefix = _CREDENTIAL_FIELD_PREFIX[api_name]
+    rset = _get_settings()
+    email = getattr(rset, f"{prefix}_email", None)
+    if not email:
+        frappe.throw(
+            f"WhiteBooks registered email for {api_name!r} is not configured "
+            "on Rohit Settings — set it under the WhiteBooks GSP section."
+        )
+    return email
 
 
 def refresh_session(api_name=None):

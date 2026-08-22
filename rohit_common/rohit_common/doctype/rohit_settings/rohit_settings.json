@@ -58,6 +58,7 @@
   "whitebooks_gst_client_secret",
   "whitebooks_gst_sandbox_client_id",
   "whitebooks_gst_sandbox_client_secret",
+  "whitebooks_gst_email",
   "cb8_2",
   "whitebooks_eway_client_id",
   "whitebooks_eway_client_secret",
@@ -373,6 +374,13 @@
    "fieldname": "whitebooks_gst_sandbox_client_secret",
    "fieldtype": "Password",
    "label": "Public GST API Sandbox Client Secret"
+  },
+  {
+   "description": "Confirmed 2026-08-22 against WhiteBooks' GST-API Postman collection: every /public/* call requires this as a query param (account email registered with WhiteBooks for this client_id/secret pair) alongside the client_id/client_secret headers - there is no OAuth2 token for this API family.",
+   "fieldname": "whitebooks_gst_email",
+   "fieldtype": "Data",
+   "label": "Public GST API Registered Email",
+   "options": "Email"
   },
   {
    "fieldname": "cb8_2",

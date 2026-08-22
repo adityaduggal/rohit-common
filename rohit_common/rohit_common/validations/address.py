@@ -10,7 +10,7 @@ from datetime import date
 from frappe.utils import flt, getdate
 from difflib import SequenceMatcher as sm
 from .google_maps import update_doc_json_from_geocode, render_gmap_json_text
-from ..india_gst_api.gst_public_api import search_gstin
+from ..india_gst_api.gst_public_api import search_gstin_whitebooks
 from ...utils.email_utils import comma_email_validations
 from ...utils.address_utils import all_address_text_validations
 from ...utils.phone_utils import comma_phone_validations
@@ -352,15 +352,27 @@ def validate_gstin_from_portal(doc, auto_days=None):
         days_since_validation = 999
     if doc.validated_gstin != doc.gstin or days_since_validation >= auto_days:
         # Validate GSTIN status after 30 days if done manually changes
-        gstin_json = search_gstin(doc.gstin)
+        # Cutover (T4/Premise 4, docs/designs/gst-asp-migration-whitebooks.md):
+        # live call switched from TaxPro (search_gstin/gsp_session.py, whose
+        # AES key-derivation assumption was failing PKCS7 unpadding) to
+        # WhiteBooks (search_gstin_whitebooks). Field mapping below
+        # (status_cd/gstin/sts) is the TaxPro/GSTN shape carried over
+        # unverified per Premise 3 (vendors pass through the GSTN schema) —
+        # doc.gstin_json_reply always stores the raw response so a live
+        # sandbox call can be inspected and this mapping corrected if
+        # WhiteBooks' actual field names differ.
+        gstin_json = search_gstin_whitebooks(doc.gstin)
+        doc.gstin_json_reply = str(gstin_json)
         if not gstin_json.get("status_cd"):
-            doc.gstin_json_reply = str(gstin_json)
             doc.validated_gstin = gstin_json.get("gstin")
             doc.gst_status = gstin_json.get("sts")
             doc.gst_validation_date = date.today()
         else:
+            # Was `exit()` (kills the worker process, not just this call) -
+            # fixed to a plain return so a bad status code just aborts this
+            # validation instead of taking down the request/job.
             frappe.msgprint("Status Code Return is Zero Hence Exiting")
-            exit()
+            return
     if doc.gst_status in ('Inactive', 'Cancelled'):
         doc.disabled = 1
     elif doc.gst_status == 'Suspended':
