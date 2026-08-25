@@ -1,0 +1,7 @@
+# Architecture: transaction view-lock
+
+**Transaction view-lock is a security/access-control feature**, not just a validation: `rohit_common/validations/transaction_lock.py`, wired via `has_permission`/`permission_query_conditions` in `hooks.py`, originally for 12 transactional doctypes (Sales/Purchase Invoice, POS Invoice, Journal Entry, Payment Entry, GL Entry, Delivery Note, Purchase Receipt, Stock Entry, Quotation, Sales/Purchase Order) and extended to `E-Invoice Submission Log` (2026-08-22, see `docs/designs/gst-asp-migration-whitebooks.md`) — check `LOCKED_DOCTYPE_DATE_FIELDS` in `transaction_lock.py` for the current, authoritative list rather than assuming it matches this doc.
+
+Once a document is older than its configured retention window (`Rohit Settings.locked_doctypes`, reusing the `Global Search DocType` child table), ordinary users can no longer view/list/print it — only a configured bypass role (and Administrator/System Manager, always exempt) can, and bypass reads are logged to `Transaction Lock Access Log`. This is read-restriction only; ERPNext's own `Accounts Settings.acc_frozen_upto` freeze still owns edit/cancel-locking, unchanged.
+
+See `docs/designs/transaction-view-lock.md` for the full design rationale, including two known/accepted gaps: General Ledger and Trial Balance (raw-SQL reports) don't respect the lock, and DocShare grants on a document must be actively revoked (daily scheduled task) since Frappe's permission engine ORs them over `has_permission`.

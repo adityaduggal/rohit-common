@@ -1,0 +1,9 @@
+# Architecture: GST/ASP integration, async pattern, custom doctypes
+
+**GST/ASP integration (`india_gst_api/`) is a thin API client layer** — `einv.py` (e-invoicing/IRN), `eway_bill_api.py` (e-way bill lifecycle), `gst_api.py`/`gst_public_api.py` (GSTIN verification) all call out to government-authorized ASP/GSP endpoints and write results back onto Sales Invoice / eWay Bill documents. Credentials/tokens are stored on `Rohit Settings` (not `Rohit GST Settings`, despite the name — verified against `rohit_settings.json` and `common.py`'s `get_aspid_pass()`).
+
+**Vendor migration in progress**: moving off Charteredinfo/TaxPro to WhiteBooks.in as the ASP, with the new integration designed to line up with the shape `india-compliance` (the v14 successor app) expects, so the v14 upgrade doesn't require a second rewrite. The Public GST family (GSTIN search/return tracking, `gst_public_api.py`) is fully cut over as of 2026-08-22 — Charteredinfo's `gsp_session.py` is deleted. e-Invoice (`einv.py`) and e-Way Bill (`eway_bill_api.py`) are still on Charteredinfo/TaxPro live, with WhiteBooks equivalents built alongside pending sandbox verification. Check `TODOS.md` / recent design docs for current migration status before assuming either vendor's API shape.
+
+**Async/background pattern**: heavy operations (invoices with ≥10 line items, e-invoice submission, address ERP sync) are queued rather than run inline, via `utils/background_doc_processing.py` and the `scheduled_tasks/` jobs, to avoid Desk request timeouts. Follow this pattern for any new operation that could be slow or hit an external API during a user-facing save/submit.
+
+**Custom DocTypes** live under `rohit_common/rohit_common/doctype/`; validation *logic* for both custom and standard (core ERPNext) DocTypes is centralized in `rohit_common/rohit_common/validations/`, separate from the DocTypes it validates — don't look for validation code next to a standard DocType's own files, it isn't there.
