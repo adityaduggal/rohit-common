@@ -25,8 +25,11 @@ class GSTReturnStatus(Document):
 			elif tup[1] > today.date():
 				frappe.throw('Selected FY {} has not Even Started'.format(tup[0]))
 		response = track_return_whitebooks(self.gstin, self.fiscal_year)
-		efiled_list = response.get('EFiledlist')
-		# frappe.throw(str(efiled_list))
+		if response.get('status_cd') == '1':
+			efiled_list = response.get('data', {}).get('EFiledlist', [])
+		else:
+			frappe.throw(response.get('status_desc'))
+
 		if efiled_list:
 			self.json_reply = str(efiled_list)
 			for d in efiled_list:
