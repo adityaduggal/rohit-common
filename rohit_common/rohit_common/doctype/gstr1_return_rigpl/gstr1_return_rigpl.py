@@ -13,7 +13,7 @@ from ....utils.common import update_child_table
 from ....utils.rohit_common_utils import check_dynamic_link
 from ....utils.accounts_utils import get_base_doc_no, get_taxes_from_sid, get_gst_si_type, get_gst_export_fields, \
     get_gst_jv_type, get_taxes_from_jvd, get_linked_type_from_jv, get_hsn_sum_frm_si, get_inv_status, \
-    get_invoice_uploader, guess_correct_address, get_base_doc_frm_docname
+    get_invoice_uploader, guess_correct_address, get_base_doc_frm_docname, get_gst_accounts_list
 from ...india_gst_api.common import gst_return_period_validation, get_dates_from_return_period
 from ...india_gst_api.gst_public_api import track_return_whitebooks, get_arn_status, \
     get_gstr1_whitebooks
@@ -173,10 +173,54 @@ class GSTR1ReturnRIGPL(Document):
         si_tables = GSTR1_SI_TABLES
         tbls_fully_validated = 0
         empty_tables = 0
-        if self.filing_status == "Filed":
-            filed = 1
-        else:
-            filed = 0
+        filed = 1 if self.filing_status == "Filed" else 0
+
+        # Batch-fetch customer_address/billing_address_gstin for every Sales-Invoice-typed
+        # row across all tables in one query, instead of 2 frappe.get_value() calls per row.
+        si_names = {d.document_number for tbl in si_tables for d in (self.get(tbl) or [])
+                    if d.document_type == "Sales Invoice"}
+        si_info = {}
+        if si_names:
+            si_info = {row.name: row for row in frappe.get_all(
+                "Sales Invoice", filters=[["name", "in", list(si_names)]],
+                fields=["name", "customer_address", "billing_address_gstin"])}
+
+        # Pass 1: resolve receiver_address/receiver_gstin per row (batched for Sales
+        # Invoice rows; Journal Entry rows still need get_linked_type_from_jv/
+        # guess_correct_address/check_dynamic_link per row - those aren't simple field
+        # reads, see TODOS.md "check_dynamic_link runs unconditionally on every JV-linked row").
+        address_names = set()
+        for tbl in si_tables:
+            for d in self.get(tbl) or []:
+                if d.document_type == "Sales Invoice":
+                    si_row = si_info.get(d.document_number)
+                    if not si_row:
+                        frappe.throw(f"Sales Invoice {d.document_number} referenced in Row# {d.idx} "
+                                     f"of {tbl} Not Found")
+                    d.receiver_address = si_row.customer_address
+                    d.receiver_gstin = si_row.billing_address_gstin
+                elif d.document_type == "Journal Entry":
+                    link_dt, link_dn = get_linked_type_from_jv(jv_name=d.document_number)
+                    # Once the linked Party is obtained we can automatically fill the address by guess
+                    # If only 1 address is there then its simple and if multiple address are there then
+                    # We would need to check the address used max for billing address in that period
+                    if not d.receiver_address:
+                        d.receiver_address = guess_correct_address(linked_dt=link_dt, linked_dn=link_dn)
+                    check_dynamic_link(parenttype="Address", parent=d.receiver_address, link_doctype=link_dt,
+                                       link_name=link_dn)
+                    d.receiver_gstin = frappe.get_value("Address", d.receiver_address, "gstin")
+                else:
+                    frappe.throw(f"{d.document_type} mentioned in Row# {d.idx} is Not Supported")
+                if d.receiver_address:
+                    address_names.add(d.receiver_address)
+
+        # Batch-fetch address_title for every resolved receiver_address, instead of 1
+        # frappe.get_value() call per row.
+        address_titles = {}
+        if address_names:
+            address_titles = {row.name: row.address_title for row in frappe.get_all(
+                "Address", filters=[["name", "in", list(address_names)]], fields=["name", "address_title"])}
+
         for tbl in si_tables:
             no_chk_rows = 0
             row_list = []
@@ -190,22 +234,7 @@ class GSTR1ReturnRIGPL(Document):
                             row_list.append(d.idx)
                     else:
                         no_chk_rows += 1
-                    if d.document_type == "Sales Invoice":
-                        d.receiver_address = frappe.get_value(d.document_type, d.document_number, "customer_address")
-                        d.receiver_gstin = frappe.get_value(d.document_type, d.document_number, "billing_address_gstin")
-                    elif d.document_type == "Journal Entry":
-                        link_dt, link_dn = get_linked_type_from_jv(jv_name=d.document_number)
-                        # Once the linked Party is obtained we can automatically fill the address by guess
-                        # If only 1 address is there then its simple and if multiple address are there then
-                        # We would need to check the address used max for billing address in that period
-                        if not d.receiver_address:
-                            d.receiver_address = guess_correct_address(linked_dt=link_dt, linked_dn=link_dn)
-                        check_dynamic_link(parenttype="Address", parent=d.receiver_address, link_doctype=link_dt,
-                                           link_name=link_dn)
-                        d.receiver_gstin = frappe.get_value("Address", d.receiver_address, "gstin")
-                    else:
-                        frappe.throw(f"{d.document_type} mentioned in Row# {d.idx} is Not Supported")
-                    d.receiver_name = frappe.get_value("Address", d.receiver_address, "address_title")
+                    d.receiver_name = address_titles.get(d.receiver_address)
                 if no_chk_rows > 0:
                     message = f"There are {no_chk_rows} rows in Table: {tbl} where GSTIN Checksum is missing But since return is filed \
                     you wont be able to Submit the Document. Pull the Data from GSTIN Network to Submit."
@@ -246,8 +275,8 @@ class GSTR1ReturnRIGPL(Document):
 
     def get_jv_entries(self, start_date, end_date):
         gst_set = frappe.get_doc("GST Settings", "GST Setting")
+        gst_accounts = get_gst_accounts_list(gst_set)
         gst_acc = []
-        cdn_b2b_list = []
         for d in gst_set.gst_accounts:
             gst_acc.append(d.cgst_account)
             gst_acc.append(d.sgst_account)
@@ -266,45 +295,37 @@ class GSTR1ReturnRIGPL(Document):
             if i not in jv_list:
                 jv_list.append(i)
         # Above list is of all JV in period where GST Accounts are there. Now JV would be Credit or Debit if it has
-        # Creditor or Debtor as a Row in JV Accounts
+        # Creditor or Debtor as a Row in JV Accounts. Batched into one query (was 1 frappe.get_doc() per JV).
         jv_cdn = []
-        for jv in jv_list:
-            jvd = frappe.get_doc("Journal Entry", jv)
-            for acc in jvd.accounts:
-                if acc.party_type == "Customer" and jvd.name not in jv_cdn:
-                    jv_cdn.append(jv)
-        for jv in jv_cdn:
-            row = get_row_from_jv_name(jv)
-            cdn_b2b_list.append(row.copy())
+        if jv_list:
+            customer_rows = frappe.get_all("Journal Entry Account", filters=[
+                ["parent", "in", jv_list], ["parenttype", "=", "Journal Entry"], ["party_type", "=", "Customer"],
+            ], fields=["parent"], distinct=True)
+            jv_cdn = [row.parent for row in customer_rows]
+        cdn_b2b_list = [row.copy() for row in get_rows_from_jv_names(jv_cdn, gst_accounts=gst_accounts)]
         update_child_table(doc=self, table_name="cdn_b2b", row_list=cdn_b2b_list)
 
     def get_invoices(self, start_date, end_date):
         inv_list = frappe.db.sql("""SELECT name FROM `tabSales Invoice` WHERE docstatus = 1 AND posting_date >= %(start_date)s
         AND posting_date <= %(end_date)s AND company_gstin = %(gstin)s
         ORDER BY customer, name""", {"start_date": start_date, "end_date": end_date, "gstin": self.gstin}, as_dict=1)
-        b2b_list = []
-        b2cl_list = []
-        b2c_list = []
-        exp_list = []
-        cdn_b2b_list = []
-        cdn_b2c_list = []
-        for inv in inv_list:
-            row = get_row_from_inv_name(inv.name)
-            if row:
-                if row["invoice_type_2"] == "b2b":
-                    b2b_list.append(row.copy())
-                elif row["invoice_type_2"] == "b2cl":
-                    b2cl_list.append(row.copy())
-                elif row["invoice_type_2"] == "b2c":
-                    b2c_list.append(row.copy())
-                elif row["invoice_type_2"] == "export":
-                    exp_list.append(row.copy())
-                elif row["invoice_type_2"] == "cdn_b2c":
-                    cdn_b2c_list.append(row.copy())
-                elif row["invoice_type_2"] == "cdn_b2b":
-                    cdn_b2b_list.append(row.copy())
-                else:
-                    frappe.throw(f"Unknown Invoice Type for {row.document_number}")
+        inv_names = [inv.name for inv in inv_list]
+        b2b_list, b2cl_list, b2c_list, exp_list, cdn_b2b_list, cdn_b2c_list = [], [], [], [], [], []
+        for row in get_rows_from_inv_names(inv_names):
+            if row["invoice_type_2"] == "b2b":
+                b2b_list.append(row.copy())
+            elif row["invoice_type_2"] == "b2cl":
+                b2cl_list.append(row.copy())
+            elif row["invoice_type_2"] == "b2c":
+                b2c_list.append(row.copy())
+            elif row["invoice_type_2"] == "export":
+                exp_list.append(row.copy())
+            elif row["invoice_type_2"] == "cdn_b2c":
+                cdn_b2c_list.append(row.copy())
+            elif row["invoice_type_2"] == "cdn_b2b":
+                cdn_b2b_list.append(row.copy())
+            else:
+                frappe.throw(f"Unknown Invoice Type for {row.document_number}")
         update_child_table(doc=self, table_name="b2b_invoices", row_list=b2b_list)
         update_child_table(doc=self, table_name="b2cl_invoices", row_list=b2cl_list)
         update_child_table(doc=self, table_name="b2c_invoices", row_list=b2c_list)
@@ -409,15 +430,22 @@ def match_and_update_details_from_gstin(gstin_resp, gstr1_doc, act_dict):
                     inv.get("inum"): get_base_doc_frm_docname(dt="Sales Invoice", dn=inv.get("inum"))
                     for inv in gstin_resp.inv
                 }
-                inv_nos = list(set(inv_no_map.values()))
-                local_rows = frappe.db.sql("""SELECT * FROM `tabGSTR1 Return Invoices` WHERE parent = %(parent)s
-                    AND parenttype = %(parenttype)s AND parentfield = %(parentfield)s
-                    AND invoice_number IN %(inv_nos)s ORDER BY idx""", {
-                        "parent": gstr1_doc.name,
-                        "parenttype": gstr1_doc.doctype,
-                        "parentfield": act_dict.get("tbl"),
-                        "inv_nos": inv_nos,
-                    }, as_dict=1)
+                # Filter out unresolved lookups (None/"" from get_base_doc_frm_docname when the
+                # invoice isn't found locally) before building the IN-list - an unfiltered None/""
+                # entry silently changes the query's matching semantics instead of raising a clear
+                # "invoice not found" error. Unresolved invoices still fall through to the "NO
+                # Invoice with Invoice No" throw below via local_rows_by_invoice.get(inv_no, []).
+                inv_nos = list({v for v in inv_no_map.values() if v})
+                local_rows = []
+                if inv_nos:
+                    local_rows = frappe.db.sql("""SELECT * FROM `tabGSTR1 Return Invoices` WHERE parent = %(parent)s
+                        AND parenttype = %(parenttype)s AND parentfield = %(parentfield)s
+                        AND invoice_number IN %(inv_nos)s ORDER BY idx""", {
+                            "parent": gstr1_doc.name,
+                            "parenttype": gstr1_doc.doctype,
+                            "parentfield": act_dict.get("tbl"),
+                            "inv_nos": inv_nos,
+                        }, as_dict=1)
                 local_rows_by_invoice = {}
                 for row in local_rows:
                     local_rows_by_invoice.setdefault(row.invoice_number, []).append(row)
@@ -497,62 +525,136 @@ def check_invoice_integrity(gst_inv_data, local_inv_data):
         frappe.throw(f"Document {inv_no} is Not Found. <br><br>GST Invoice Data is {gst_inv_data} <br> <br> Local Invoice Data is {local_inv_data}")
 
 
-def get_row_from_jv_name(jv_name):
-    row = frappe._dict({})
-    jvd = frappe.get_doc("Journal Entry", jv_name)
-    jv_type = get_gst_jv_type(jvd)
-    if jv_type == "credit":
-        note_type = "Credit"
-    else:
-        note_type = "Debit"
-    tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt, net_amt = get_taxes_from_jvd(jvd, jv_type)
-    row["is_credit_debit"] = 1
-    row["note_type"] = note_type
-    row["document_type"] = "Journal Entry"
-    row["document_number"] = jvd.name
-    row["invoice_number"] = get_base_doc_no(jvd)
-    row["invoice_date"] = jvd.posting_date
-    row["total_invoice_value"] = jvd.total_debit
-    row["taxable_value"] = net_amt
-    row["rate"] = tax_rate
-    row["igst"] = igst_amt
-    row["sgst"] = sgst_amt
-    row["cgst"] = cgst_amt
-    return row
+def get_rows_from_jv_names(jv_names, gst_accounts=None):
+    # Batched replacement for the old get_row_from_jv_name(jv_name), which did
+    # 1 frappe.get_doc("Journal Entry", ...) plus a fresh GST Settings fetch
+    # (inside get_taxes_from_jvd) for every single JV. Fetches JV headers and
+    # JV Account child rows once for the whole jv_names list instead.
+    if not jv_names:
+        return []
+    if gst_accounts is None:
+        gst_accounts = get_gst_accounts_list()
+    jv_info = {
+        row.name: row for row in frappe.get_all(
+            "Journal Entry", filters=[["name", "in", jv_names]],
+            fields=["name", "posting_date", "total_debit", "amended_from"])
+    }
+    account_rows = frappe.get_all("Journal Entry Account", filters=[
+        ["parent", "in", jv_names], ["parenttype", "=", "Journal Entry"],
+    ], fields=["parent", "account", "party_type", "credit_in_account_currency", "debit_in_account_currency"])
+    accounts_by_jv = {}
+    for acc in account_rows:
+        accounts_by_jv.setdefault(acc.parent, []).append(acc)
 
-
-def get_row_from_inv_name(inv_name):
-    row = frappe._dict({})
-    multi_factor = 1
-    sid = frappe.get_doc("Sales Invoice", inv_name)
-    inv_type = get_gst_si_type(sid)
-    if inv_type == "cdn_b2b" or inv_type == "cdn_b2c":
+    rows = []
+    for jv_name in jv_names:
+        jv_row = jv_info.get(jv_name)
+        if not jv_row:
+            frappe.throw(f"Journal Entry {jv_name} Not Found")
+        jvd = frappe._dict({"accounts": accounts_by_jv.get(jv_name, [])})
+        jv_type = get_gst_jv_type(jvd)
+        note_type = "Credit" if jv_type == "credit" else "Debit"
+        tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt, net_amt = get_taxes_from_jvd(
+            jvd, jv_type, gst_accounts=gst_accounts)
+        row = frappe._dict({})
         row["is_credit_debit"] = 1
-        row["note_type"] = "Credit"
-        multi_factor = -1
+        row["note_type"] = note_type
+        row["document_type"] = "Journal Entry"
+        row["document_number"] = jv_name
+        row["invoice_number"] = get_base_doc_no(frappe._dict({
+            "doctype": "Journal Entry", "name": jv_name, "amended_from": jv_row.amended_from,
+        }))
+        row["invoice_date"] = jv_row.posting_date
+        row["total_invoice_value"] = jv_row.total_debit
+        row["taxable_value"] = net_amt
+        row["rate"] = tax_rate
+        row["igst"] = igst_amt
+        row["sgst"] = sgst_amt
+        row["cgst"] = cgst_amt
+        rows.append(row)
+    return rows
 
-    elif inv_type == "export":
-        row["export_sales"] = 1
-        row["shipping_bill_no"], row["shipping_bill_date"], row["gst_payment"], row["port_code"] = get_gst_export_fields(sid)
-    bad_doc = frappe.get_doc("Address", sid.customer_address)
-    base_inv_no = get_base_doc_no(sid)
-    tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt = get_taxes_from_sid(sid)
-    row["invoice_type_2"] = inv_type
-    row["invoice_type"] = "R-Regular B2B Invoices" # TODO make invoice Type dynamic instead of static
-    row["receiver_address"] = sid.customer_address
-    row["receiver_gstin"] = sid.billing_address_gstin
-    row["document_type"] = "Sales Invoice"
-    row["document_number"] = sid.name
-    row["invoice_number"] = base_inv_no
-    row["receiver_name"] = bad_doc.address_title
-    row["invoice_date"] = sid.posting_date
-    row["total_invoice_value"] = sid.base_grand_total * multi_factor
-    row["rate"] = tax_rate
-    row["taxable_value"] = sid.base_net_total * multi_factor
-    row["igst"] = igst_amt * multi_factor
-    row["sgst"] = sgst_amt * multi_factor
-    row["cgst"] = cgst_amt * multi_factor
-    return row
+
+def get_rows_from_inv_names(inv_names):
+    # Batched replacement for the old get_row_from_inv_name(inv_name), which
+    # did frappe.get_doc() per Sales Invoice, per Address, and (via
+    # get_gst_si_type/get_gst_export_fields/get_taxes_from_sid) 2-3 more
+    # frappe.get_doc() calls per invoice for the shared GST Settings/Sales
+    # Taxes and Charges Template. Fetches everything once for the whole
+    # inv_names list, and skips (msgprint, not throw) any invoice with a
+    # missing/invalid Customer Address instead of crashing the whole batch.
+    if not inv_names:
+        return []
+    gst_accounts = get_gst_accounts_list()
+    si_fields = ["name", "customer_address", "billing_address_gstin", "is_return", "taxes_and_charges",
+                 "base_grand_total", "base_net_total", "posting_date", "amended_from",
+                 "shipping_bill_number", "shipping_bill_date", "port_code"]
+    si_info = {row.name: row for row in frappe.get_all(
+        "Sales Invoice", filters=[["name", "in", inv_names]], fields=si_fields)}
+
+    tax_rows = frappe.get_all("Sales Taxes and Charges", filters=[
+        ["parent", "in", inv_names], ["parenttype", "=", "Sales Invoice"],
+    ], fields=["parent", "account_head", "base_tax_amount", "rate"])
+    taxes_by_invoice = {}
+    for t in tax_rows:
+        taxes_by_invoice.setdefault(t.parent, []).append(t)
+
+    template_names = list({si.taxes_and_charges for si in si_info.values() if si.taxes_and_charges})
+    templates = {}
+    if template_names:
+        templates = {t.name: t for t in frappe.get_all(
+            "Sales Taxes and Charges Template", filters=[["name", "in", template_names]],
+            fields=["name", "is_export", "export_type"])}
+
+    address_names = list({si.customer_address for si in si_info.values() if si.customer_address})
+    addresses = {}
+    if address_names:
+        addresses = {a.name: a for a in frappe.get_all(
+            "Address", filters=[["name", "in", address_names]], fields=["name", "address_title"])}
+
+    rows = []
+    for inv_name in inv_names:
+        si = si_info.get(inv_name)
+        if not si:
+            frappe.throw(f"Sales Invoice {inv_name} Not Found")
+        if not si.customer_address or si.customer_address not in addresses:
+            frappe.msgprint(f"Sales Invoice {inv_name} has No Valid Customer Address - "
+                             f"skipped for GSTR1 generation, please correct and re-run")
+            continue
+        sid = frappe._dict(si)
+        sid["doctype"] = "Sales Invoice"
+        sid["taxes"] = taxes_by_invoice.get(inv_name, [])
+        tax_template = templates.get(si.taxes_and_charges)
+        multi_factor = 1
+        row = frappe._dict({})
+        inv_type = get_gst_si_type(sid, tax_template=tax_template)
+        if inv_type == "cdn_b2b" or inv_type == "cdn_b2c":
+            row["is_credit_debit"] = 1
+            row["note_type"] = "Credit"
+            multi_factor = -1
+        elif inv_type == "export":
+            row["export_sales"] = 1
+            row["shipping_bill_no"], row["shipping_bill_date"], row["gst_payment"], row["port_code"] = \
+                get_gst_export_fields(sid, tax_template=tax_template)
+        base_inv_no = get_base_doc_no(sid)
+        tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt = get_taxes_from_sid(sid, gst_accounts=gst_accounts)
+        row["invoice_type_2"] = inv_type
+        row["invoice_type"] = "R-Regular B2B Invoices" # TODO make invoice Type dynamic instead of static
+        row["receiver_address"] = si.customer_address
+        row["receiver_gstin"] = si.billing_address_gstin
+        row["document_type"] = "Sales Invoice"
+        row["document_number"] = si.name
+        row["invoice_number"] = base_inv_no
+        row["receiver_name"] = addresses[si.customer_address].address_title
+        row["invoice_date"] = si.posting_date
+        row["total_invoice_value"] = si.base_grand_total * multi_factor
+        row["rate"] = tax_rate
+        row["taxable_value"] = si.base_net_total * multi_factor
+        row["igst"] = igst_amt * multi_factor
+        row["sgst"] = sgst_amt * multi_factor
+        row["cgst"] = cgst_amt * multi_factor
+        rows.append(row)
+    return rows
 
 def correct_invoice_gst_as_per_gstr1(inv_no, corr_gstin):
     frappe.db.set_value("Sales Invoice", inv_no, "billing_address_gstin", corr_gstin)

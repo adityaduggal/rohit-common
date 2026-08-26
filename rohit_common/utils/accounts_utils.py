@@ -117,13 +117,14 @@ def guess_correct_address(linked_dt, linked_dn):
         return all_addresses[0].name
 
 
-def get_gst_export_fields(si_doc):
+def get_gst_export_fields(si_doc, tax_template=None):
     shb, shd_date, tax_payment, port_code = "", "", "", ""
-    tax_doc = frappe.get_doc("Sales Taxes and Charges Template", si_doc.taxes_and_charges)
-    if tax_doc.is_export == 1:
+    if tax_template is None:
+        tax_template = frappe.get_doc("Sales Taxes and Charges Template", si_doc.taxes_and_charges)
+    if tax_template.is_export == 1:
         shb = si_doc.shipping_bill_number
         shb_date = si_doc.shipping_bill_date
-        tax_payment = tax_doc.export_type
+        tax_payment = tax_template.export_type
         port_code = si_doc.port_code
     return shb, shb_date, tax_payment, port_code
 
@@ -138,10 +139,11 @@ def get_gst_jv_type(jv_doc):
                 return "debit"
 
 
-def get_gst_si_type(si_doc):
-    tax_doc = frappe.get_doc("Sales Taxes and Charges Template", si_doc.taxes_and_charges)
+def get_gst_si_type(si_doc, tax_template=None):
+    if tax_template is None:
+        tax_template = frappe.get_doc("Sales Taxes and Charges Template", si_doc.taxes_and_charges)
     if si_doc.is_return != 1:
-        if tax_doc.is_export == 1:
+        if tax_template.is_export == 1:
             return "export"
         elif si_doc.billing_address_gstin == "NA":
             if si_doc.base_grand_total >= 250000:
@@ -157,26 +159,40 @@ def get_gst_si_type(si_doc):
             return "cdn_b2b"
 
 
-def get_taxes_from_jvd(jvd, jv_type):
-    tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt, net_amt = 0, 0, 0, 0, 0, 0
-    gst_set = frappe.get_doc("GST Settings", "GST Setting")
+def get_gst_accounts_list(gst_set=None):
+    """Build the cgst/sgst/igst/cess account list from GST Settings.
+
+    Pass a pre-fetched `gst_set` (or the return value of this function,
+    via `get_taxes_from_jvd`/`get_taxes_from_sid`'s `gst_accounts` param)
+    when processing many rows in a loop, instead of re-fetching GST
+    Settings once per row.
+    """
+    if gst_set is None:
+        gst_set = frappe.get_doc("GST Settings", "GST Setting")
     gst_taxes = []
+    for d in gst_set.gst_accounts:
+        gst_dict = frappe._dict({})
+        gst_dict["cgst"] = d.cgst_account
+        gst_dict["sgst"] = d.sgst_account
+        gst_dict["igst"] = d.igst_account
+        gst_dict["cess"] = d.cess_account
+        gst_taxes.append(gst_dict.copy())
+    return gst_taxes
+
+
+def get_taxes_from_jvd(jvd, jv_type, gst_accounts=None):
+    tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt, net_amt = 0, 0, 0, 0, 0, 0
     if jv_type == "credit":
         acc_type = "debit"
     elif jv_type == "debit":
         acc_type = "credit"
     else:
         acc_type = ""
-    if gst_set.gst_accounts:
-        for d in gst_set.gst_accounts:
-            gst_dict = frappe._dict({})
-            gst_dict["cgst"] = d.cgst_account
-            gst_dict["sgst"] = d.sgst_account
-            gst_dict["igst"] = d.igst_account
-            gst_dict["cess"] = d.cess_account
-            gst_taxes.append(gst_dict.copy())
-    else:
+    if gst_accounts is None:
+        gst_accounts = get_gst_accounts_list()
+    if not gst_accounts:
         frappe.throw("No GST Accounts Setup in GST Settings")
+    gst_taxes = gst_accounts
     for acc in jvd.accounts:
         if acc.account not in gst_taxes[0].values():
             net_amt += acc.get(acc_type + "_in_account_currency", 0)
@@ -199,19 +215,12 @@ def get_taxes_from_jvd(jvd, jv_type):
     return tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt, net_amt
 
 
-def get_taxes_from_sid(sid):
+def get_taxes_from_sid(sid, gst_accounts=None):
     tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt = 0, 0 ,0 ,0, 0
-    gst_set = frappe.get_doc("GST Settings", "GST Setting")
-    gst_taxes = []
-    for d in gst_set.gst_accounts:
-        gst_dict = frappe._dict({})
-        gst_dict["cgst"] = d.cgst_account
-        gst_dict["sgst"] = d.sgst_account
-        gst_dict["igst"] = d.igst_account
-        gst_dict["cess"] = d.cess_account
-        gst_taxes.append(gst_dict.copy())
+    if gst_accounts is None:
+        gst_accounts = get_gst_accounts_list()
     for acc in sid.taxes:
-        for gst in gst_taxes:
+        for gst in gst_accounts:
             found = 0
             if acc.account_head == gst.cgst:
                 cgst_amt += acc.base_tax_amount
