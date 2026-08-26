@@ -47,6 +47,13 @@ gstr1_actions = [
 # {"action": "RESET", "name": "Reset GSTR1"}
 # {"action": "RESTSAVE", "name": "Save GSTR1"}
 
+# The 6 tables used identically (same names, same order) by generate_hsn_summary,
+# validate_si_tables, and clear_all_tables. NOT used by generate_synopsis, which
+# needs a display name per table and lists cdn_b2b/cdn_b2c in the opposite order,
+# or by clear_all_tables, which additionally clears "hsn_summary" - keep those
+# separate rather than folding them into this constant.
+GSTR1_SI_TABLES = ["b2b_invoices", "b2cl_invoices", "cdn_b2c", "cdn_b2b", "export_invoices", "b2c_invoices"]
+
 
 class GSTR1ReturnRIGPL(Document):
 
@@ -127,9 +134,8 @@ class GSTR1ReturnRIGPL(Document):
 
     def generate_hsn_summary(self):
         self.set("hsn_summary", [])
-        si_tables = ["b2b_invoices", "b2cl_invoices", "cdn_b2c", "cdn_b2b", "export_invoices", "b2c_invoices"]
         hsn_map = {}
-        for tbl in si_tables:
+        for tbl in GSTR1_SI_TABLES:
             for row in self.get(tbl) or []:
                 if row.document_type == "Sales Invoice":
                     for hsn in get_hsn_sum_frm_si(row.document_number):
@@ -164,7 +170,7 @@ class GSTR1ReturnRIGPL(Document):
         frappe.throw("Submission is Not Allowed for the Time Being")
 
     def validate_si_tables(self, submit=0):
-        si_tables = ["b2b_invoices", "b2cl_invoices", "cdn_b2c", "cdn_b2b", "export_invoices", "b2c_invoices"]
+        si_tables = GSTR1_SI_TABLES
         tbls_fully_validated = 0
         empty_tables = 0
         if self.filing_status == "Filed":
@@ -307,8 +313,7 @@ class GSTR1ReturnRIGPL(Document):
         update_child_table(doc=self, table_name="cdn_b2c", row_list=cdn_b2c_list)
 
     def clear_all_tables(self):
-        si_tables = ["b2b_invoices", "b2cl_invoices", "cdn_b2c", "cdn_b2b", "export_invoices", "b2c_invoices",
-                     "hsn_summary"]
+        si_tables = GSTR1_SI_TABLES + ["hsn_summary"]
         self.synopsis_text = ""
         for si in si_tables:
             self.set(si, [])
