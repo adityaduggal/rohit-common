@@ -128,31 +128,24 @@ class GSTR1ReturnRIGPL(Document):
     def generate_hsn_summary(self):
         self.set("hsn_summary", [])
         si_tables = ["b2b_invoices", "b2cl_invoices", "cdn_b2c", "cdn_b2b", "export_invoices", "b2c_invoices"]
-        hsn_list = []
+        hsn_map = {}
         for tbl in si_tables:
-            if self.get(tbl):
-                for row in self.get(tbl):
-                    if row.document_type == "Sales Invoice":
-                        hsn_sum = get_hsn_sum_frm_si(row.document_number)
-                        if hsn_list:
-                            for hsn in hsn_sum:
-                                found = 0
-                                for base_hsn in hsn_list:
-                                    if base_hsn.hsn == hsn.hsn and base_hsn.uom == hsn.uom:
-                                        found = 1
-                                        base_hsn.total_quantity += hsn.total_quantity
-                                        base_hsn.total_taxable_value += hsn.total_taxable_value
-                                        base_hsn.igst += hsn.igst
-                                        base_hsn.cgst += hsn.cgst
-                                        base_hsn.sgst += hsn.sgst
-                                        base_hsn.cess += hsn.cess
-                                        base_hsn.total_value += hsn.total_value
-                                if found == 0:
-                                    hsn_list.append(hsn.copy())
+            for row in self.get(tbl) or []:
+                if row.document_type == "Sales Invoice":
+                    for hsn in get_hsn_sum_frm_si(row.document_number):
+                        key = (hsn.hsn, hsn.uom)
+                        base_hsn = hsn_map.get(key)
+                        if base_hsn:
+                            base_hsn.total_quantity += hsn.total_quantity
+                            base_hsn.total_taxable_value += hsn.total_taxable_value
+                            base_hsn.igst += hsn.igst
+                            base_hsn.cgst += hsn.cgst
+                            base_hsn.sgst += hsn.sgst
+                            base_hsn.cess += hsn.cess
+                            base_hsn.total_value += hsn.total_value
                         else:
-                            for hsn in hsn_sum:
-                                hsn_list.append(hsn.copy())
-        hsn_list = sorted(hsn_list, key=lambda i: i["hsn"], reverse=0)
+                            hsn_map[key] = hsn.copy()
+        hsn_list = sorted(hsn_map.values(), key=lambda i: i["hsn"], reverse=0)
         update_child_table(doc=self, table_name="hsn_summary", row_list=hsn_list)
 
 
