@@ -26,7 +26,7 @@ override_whitelisted_methods = {  # Below mentod would also take into account th
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/rohit_common/css/rohit_common.css"
-# app_include_js = ["/assets/rohit_common/js/myapp.min.js"]
+app_include_js = ["/assets/rohit_common/js/file_uploader_search.js"]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/rohit_common/css/rohit_common.css"
