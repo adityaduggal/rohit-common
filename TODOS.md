@@ -133,3 +133,106 @@ can actually go live, on top of the migration itself.
 **Depends on:** The ASP migration's provider-swap half (Approach B layer)
 landing first - e-way bill's auth still needs migrating to WhiteBooks
 regardless of what triggers generation.
+
+---
+
+## GSTR1 Return RIGPL: build full unit test suite
+
+**What:** Write unit tests for `gstr1_return_rigpl.py` - currently
+`test_gstr1_return_rigpl.py` is an empty stub. Cover `validate_si_tables`,
+`generate_hsn_summary`, `generate_synopsis`, `process_gstr1`/
+`match_and_update_details_from_gstin` (mocking GSTN/WhiteBooks responses),
+and the missing-table handling and tolerance-comparison fix landed in the
+2026-08-26 `/plan-eng-review` pass.
+
+**Why:** Raised during `/plan-eng-review` of `gstr1_return_rigpl/`. This is
+the highest-stakes file in the doctype (GST compliance reconciliation, hard
+`frappe.throw`s on any GSTN mismatch) with zero test coverage, and that
+review's session landed several non-trivial fixes (12 new child tables,
+SQL parameterization, an O(n^2) HSN-merge rewrite, N+1 batching, a
+truncation-vs-tolerance fix in B2C reconciliation) with no regression
+coverage proving they didn't break the reconciliation logic.
+
+**Pros:** Proves the core reconciliation functions behave correctly;
+catches regressions from the 2026-08-26 fixes; mirrors this repo's existing
+`test_gsp_session.py`/`test_transaction_lock.py` pattern so there's a
+template to follow.
+
+**Cons:** Significant effort - needs mocked GSTN/WhiteBooks response
+fixtures across many code paths (B2B/B2CL/CDN/export/B2C reconciliation
+branches each have different response shapes).
+
+**Effort:** L (human ~1-2 days / CC ~1-1.5 hrs)
+**Priority:** P1
+**Depends on:** Should land after the 2026-08-26 fixes are merged, so tests
+are written against the corrected code (missing-table handling, dict-based
+HSN merge, tolerance-based B2C comparison), not the code being replaced.
+
+---
+
+## GSTR1 Return RIGPL: finish or formally kill the submit workflow
+
+**What:** `gstr1_return_rigpl.json` sets `is_submittable: 1`, but
+`on_submit()` (gstr1_return_rigpl.py:167-170) runs `validate_export_invoices()`
+and `validate_si_tables(submit=1)` - real validation work - then
+unconditionally throws `"Submission is Not Allowed for the Time Being"`. No
+document of this type can ever actually be submitted.
+
+**Why:** Raised during `/plan-eng-review`. Either finish the submit
+workflow (decide what "submitted" means for this doctype: does it lock the
+record, trigger actual GST filing, just flip a status field?) or remove
+`is_submittable`/`on_submit` entirely so the UI stops presenting a workflow
+that can never complete.
+
+**Pros:** Resolves confusing UX (a submit button that always fails after
+doing real validation work first); forces an explicit product decision
+instead of leaving a silent WIP block in place indefinitely.
+
+**Cons:** Not just a code change - needs a product decision on GSTR1
+submission semantics in this system first.
+
+**Critical implementation note (found during outside-voice cross-model
+review):** `validate_si_tables` (line 172-226) mutates child-row fields
+(`receiver_address`, `receiver_gstin`, `receiver_name`) in memory but never
+persists them - this is currently harmless only because the `on_submit`
+throw always fires before anything downstream matters. Whoever unblocks
+submission MUST also add `self.save()` or per-row `db_set()` calls for
+these mutations, or submit will proceed with stale receiver data that was
+never actually saved.
+
+**Effort:** M (human ~2-4 hrs once submission semantics are decided / CC
+~20-30 min)
+**Priority:** P2
+**Depends on:** A product decision on what GSTR1 submission should do.
+
+---
+
+## GSTR1 Return RIGPL: `check_dynamic_link` runs unconditionally on every JV-linked row
+
+**What:** In `validate_si_tables` (gstr1_return_rigpl.py:196-204), for
+Journal-Entry-linked rows, `receiver_address` is only *guessed* when empty
+(`if not d.receiver_address: ...guess_correct_address(...)`), but
+`check_dynamic_link` runs unconditionally on every such row regardless of
+whether the address was just guessed or was already manually set. Investigate
+whether this re-validates legitimate manually-set addresses on every
+`validate()` call, and if a failure there produces a hard throw with no
+visible explanation to the user of why their manually-set address was
+rejected.
+
+**Why:** Surfaced by the outside-voice cross-model review during
+`/plan-eng-review` of this file. Not independently confirmed - moderate
+confidence this is a real UX/correctness gap, not certain it's frequently
+hit in practice, since `check_dynamic_link`'s actual failure modes weren't
+traced during this review.
+
+**Pros:** If confirmed, fixing it either scopes the check to guessed-only
+addresses or improves the error message so users understand why a
+manually-set address failed.
+
+**Cons:** Needs investigation first (trace `check_dynamic_link`'s
+implementation and failure modes) before deciding whether a code change is
+even warranted.
+
+**Effort:** S (human ~30-45 min investigation / CC ~10-15 min)
+**Priority:** P3
+**Depends on:** Nothing - can be picked up independently.

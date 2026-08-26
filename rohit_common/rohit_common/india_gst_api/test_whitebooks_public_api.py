@@ -3,9 +3,10 @@
 # -*- coding: utf-8 -*-
 """
 Unit tests for gst_public_api.py's WhiteBooks.in functions (T4, docs/
-designs/gst-asp-migration-whitebooks.md) — request wiring only, mocked
-(frappe, requests, whitebooks_provider), no live site or WhiteBooks
-credentials required.
+designs/gst-asp-migration-whitebooks.md; get_gstr1_whitebooks() added
+2026-08-26 during /plan-eng-review of gstr1_return_rigpl/) — request wiring
+only, mocked (frappe, requests, whitebooks_provider), no live site or
+WhiteBooks credentials required.
 
 Auth model confirmed 2026-08-22 against WhiteBooks' "GST-API" Postman
 collection: PUBLIC_GST has no OAuth2 token endpoint at all — every call
@@ -156,6 +157,93 @@ class TestTrackReturnWhitebooks(unittest.TestCase):
 
         self.assertEqual(arn, "ARN123")
         self.assertEqual(status, "Filed")
+
+
+class TestGetGstr1Whitebooks(unittest.TestCase):
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
+    def test_builds_request_with_gstin_period_action_and_static_headers(
+        self, mock_requests, mock_wb
+    ):
+        _configure_wb(mock_wb)
+        mock_requests.get.return_value = _fake_response(
+            200, {"status_cd": "1", "b2b": [{"ctin": "27AAACT2727Q1ZW"}]}
+        )
+
+        result = gst_public_api.get_gstr1_whitebooks("06AAACR1567J1ZC", "072026", "B2B")
+
+        called_url = mock_requests.get.call_args.kwargs["url"]
+        self.assertTrue(called_url.endswith("/returns/gstr1"))
+        self.assertEqual(
+            mock_requests.get.call_args.kwargs["params"],
+            {
+                "email": "gsp@rigpl.com",
+                "gstin": "06AAACR1567J1ZC",
+                "ret_period": "072026",
+                "action": "B2B",
+            },
+        )
+        self.assertEqual(
+            mock_requests.get.call_args.kwargs["headers"],
+            {"client_id": "cid", "client_secret": "csecret"},
+        )
+        self.assertEqual(result["b2b"][0]["ctin"], "27AAACT2727Q1ZW")
+
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
+    def test_does_not_use_oauth2_token_machinery(self, mock_requests, mock_wb):
+        """Same PUBLIC_GST family as search/rettrack - no OAuth2 token
+        endpoint, per the module docstring's auth assumption (1)."""
+        _configure_wb(mock_wb)
+        mock_requests.get.return_value = _fake_response(200, {"status_cd": "1", "b2b": []})
+
+        gst_public_api.get_gstr1_whitebooks("06AAACR1567J1ZC", "072026", "B2B")
+
+        mock_wb.get_headers.assert_not_called()
+        mock_wb.get_token.assert_not_called()
+        mock_wb.get_static_client_headers.assert_called_once_with("gst")
+
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
+    def test_status_cd_zero_returns_falsy_without_throwing(self, mock_requests, mock_wb):
+        """gstr1_return_rigpl.py's get_gstr1_details() does `if not resp:
+        msgprint(...)` upstream - status_cd=0 must stay falsy, not throw."""
+        _configure_wb(mock_wb)
+        mock_requests.get.return_value = _fake_response(200, {"status_cd": "0"})
+
+        result = gst_public_api.get_gstr1_whitebooks("06AAACR1567J1ZC", "072026", "NIL")
+
+        self.assertFalse(result)
+
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.frappe")
+    def test_unrecognized_response_throws(self, mock_frappe, mock_requests, mock_wb):
+        """Neither status_cd=1 nor the action key present nor status_cd=0 -
+        an unrecognized shape must fail loud, not silently pass through."""
+        _configure_wb(mock_wb)
+        mock_requests.get.return_value = _fake_response(200, {"error": "unexpected"})
+        mock_frappe.throw.side_effect = Exception("thrown")
+
+        with self.assertRaises(Exception):
+            gst_public_api.get_gstr1_whitebooks("06AAACR1567J1ZC", "072026", "B2B")
+
+        mock_frappe.throw.assert_called_once()
+
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
+    @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
+    def test_action_key_present_is_accepted_even_without_status_cd_1(
+        self, mock_requests, mock_wb
+    ):
+        """Response envelope assumption (3): a dict keyed by lowercase
+        action code is accepted on its own, matching the legacy
+        get_gstr1()'s contract even if status_cd isn't exactly '1'."""
+        _configure_wb(mock_wb)
+        mock_requests.get.return_value = _fake_response(200, {"hsnsum": [{"hsn": "1234"}]})
+
+        result = gst_public_api.get_gstr1_whitebooks("06AAACR1567J1ZC", "072026", "HSNSUM")
+
+        self.assertEqual(result["hsnsum"][0]["hsn"], "1234")
 
 
 if __name__ == "__main__":

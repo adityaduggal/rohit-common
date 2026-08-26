@@ -15,8 +15,8 @@ from ....utils.accounts_utils import get_base_doc_no, get_taxes_from_sid, get_gs
     get_gst_jv_type, get_taxes_from_jvd, get_linked_type_from_jv, get_hsn_sum_frm_si, get_inv_status, \
     get_invoice_uploader, guess_correct_address, get_base_doc_frm_docname
 from ...india_gst_api.common import gst_return_period_validation, get_dates_from_return_period
-from ...india_gst_api.gst_api import get_gstr1
-from ...india_gst_api.gst_public_api import track_return_whitebooks, get_arn_status
+from ...india_gst_api.gst_public_api import track_return_whitebooks, get_arn_status, \
+    get_gstr1_whitebooks
 
 gstr1_actions = [
     {"action": "AT", "name": "Advances Tax", "tbl": "at_invoices"},
@@ -72,7 +72,8 @@ class GSTR1ReturnRIGPL(Document):
             # Also disable all the tables for editing
             # gstr1_actions = [{"action": "B2B", "name": "B2B", "tbl": "b2b_invoices"}]
             for act_dict in gstr1_actions:
-                resp = get_gstr1(gstin=self.gstin, ret_period=self.return_period, action=act_dict.get("action"))
+                resp = get_gstr1_whitebooks(gstin=self.gstin, ret_period=self.return_period,
+                                            action=act_dict.get("action"))
                 # resp = json.loads(self.json_reply.replace("'", '"'))
                 if not resp:
                     frappe.msgprint(f"<b>{act_dict.get('name')}</b> there is Some Error or No Data "
