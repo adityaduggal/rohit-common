@@ -32,10 +32,15 @@
   "sb06",
   "export_invoices",
   "sb07",
+  "b2ba_invoices",
   "sb08",
+  "b2cla_invoices",
   "sb09",
+  "export_amend",
   "sb10",
+  "cdb_b2ba",
   "sb11",
+  "cdn_b2ca",
   "sb12",
   "b2c_invoices",
   "sb13",
@@ -47,6 +52,7 @@
   "sb18",
   "sb19",
   "sb20",
+  "b2csa_invoices",
   "amended_from",
   "json_reply"
  ],
@@ -58,10 +64,22 @@
    "label": "Amended Credit/Debit Notes (Registered) (9C)"
   },
   {
+   "fieldname": "cdb_b2ba",
+   "fieldtype": "Table",
+   "label": "Registered Credit or Debit Notes Amendments",
+   "options": "GSTR1 Return Invoices"
+  },
+  {
    "collapsible": 1,
    "fieldname": "sb11",
    "fieldtype": "Section Break",
    "label": "Amended Credit/Debit Notes (Unregistered) (9C)"
+  },
+  {
+   "fieldname": "cdn_b2ca",
+   "fieldtype": "Table",
+   "label": "Un-Registered Credit or Debit Notes Amendments",
+   "options": "GSTR1 Return Invoices"
   },
   {
    "collapsible": 1,
@@ -199,16 +217,34 @@
    "label": "Amended B2B Invoices (9A)"
   },
   {
+   "fieldname": "b2ba_invoices",
+   "fieldtype": "Table",
+   "label": "B2B Amended Invoices",
+   "options": "GSTR1 Return Invoices"
+  },
+  {
    "collapsible": 1,
    "fieldname": "sb08",
    "fieldtype": "Section Break",
    "label": "Amended B2C (Large) Invoices (9A)"
   },
   {
+   "fieldname": "b2cla_invoices",
+   "fieldtype": "Table",
+   "label": "B2C Large Amended Invoices",
+   "options": "GSTR1 Return Invoices"
+  },
+  {
    "collapsible": 1,
    "fieldname": "sb09",
    "fieldtype": "Section Break",
    "label": "Amended Export Invoices (9A)"
+  },
+  {
+   "fieldname": "export_amend",
+   "fieldtype": "Table",
+   "label": "Export Invoices Amendments",
+   "options": "GSTR1 Return Invoices"
   },
   {
    "fieldname": "address",
@@ -289,6 +325,12 @@
    "fieldname": "sb20",
    "fieldtype": "Section Break",
    "label": "Amended B2C Others (12)"
+  },
+  {
+   "fieldname": "b2csa_invoices",
+   "fieldtype": "Table",
+   "label": "B2C Small Amended Invoices",
+   "options": "GSTR1 Return Invoices"
   },
   {
    "fieldname": "synopsis_text",

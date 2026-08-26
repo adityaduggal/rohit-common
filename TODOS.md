@@ -236,3 +236,98 @@ even warranted.
 **Effort:** S (human ~30-45 min investigation / CC ~10-15 min)
 **Priority:** P3
 **Depends on:** Nothing - can be picked up independently.
+
+---
+
+## GSTR1 Return RIGPL: local population for the 6 new amendment tables
+
+**What:** `gstr1_return_rigpl.json` now has 6 new child-table fields
+(`b2ba_invoices`, `b2cla_invoices`, `b2csa_invoices`, `cdb_b2ba`,
+`cdn_b2ca`, `export_amend`) for B2B/B2CL/B2CS/CDN-Registered/
+CDN-Unregistered/Export amendments - previously these had zero doctype
+field, so `process_gstr1()` would hard-throw with "Data in GST Network but
+Table for the Same is Empty" the moment GSTN returned any amendment data,
+with no way to even manually reconcile. The fields reuse the `GSTR1 Return
+Invoices` child doctype and slot into section breaks (`sb07`-`sb11`,
+`sb20`) that were already scaffolded in the original 2021 doctype design
+but never filled in.
+
+Adding the fields makes manual entry/reconciliation possible for the first
+time, but does **not** by itself stop the hard-throw: `get_invoices()` (the
+method that auto-populates the 6 original tables from period-scoped Sales
+Invoices) has no equivalent for amendments, and `clear_all_tables()` still
+only lists the original 6 tables. Until a local-population query exists,
+`self.get(tbl, [])` returns `[]` for these fields exactly as before the
+fields were added, and `process_gstr1()` will still throw whenever GSTN
+reports amendment data for a period where nothing was manually entered.
+
+**Why deferred:** Detecting "which Sales Invoices were reported in an
+earlier GSTR1 period and later amended/cancelled" is a genuinely new local
+query - it depends on what "amendment" means operationally in this system
+(ERPNext's own amend-after-submit flow? A manual correction workflow? A
+credit/debit note against an already-filed invoice?), which needs a design
+decision, not just code.
+
+**Pros:** Once designed, closes the last gap in GSTR1 auto-reconciliation;
+until then, at least unblocks manual entry so amendment periods aren't
+categorically impossible to file from this doctype.
+
+**Cons:** Needs a product/design decision on what counts as a
+locally-amended invoice before any population code can be written safely -
+same tax-compliance stakes as the rest of this doctype.
+
+**Effort:** M (human ~1 day once scoped / CC ~30-45 min)
+**Priority:** P2
+**Depends on:** A design decision on local amendment detection. See also
+the sibling TODO below for the 7 aggregate GSTR1 categories that still
+have no doctype fields at all.
+
+---
+
+## GSTR1 Return RIGPL: 7 aggregate categories have no local data model at all
+
+**What:** 7 of the 20 `gstr1_actions` entries still have no doctype field
+and no local data model to reconcile against: `AT`/`ATA` (Advances Tax +
+Amendments), `DOCISS` (Documents Issued), `EINV` (e-Invoices), `NIL` (Nil
+Rated Supplies), and `TXP`/`TXPA` (Tax Paid + Amendments). Unlike the 6
+amendment tables above (which reuse the existing `GSTR1 Return Invoices`
+shape), these are not invoice-shaped at all:
+
+- `AT`/`TXP`/their amendments track advance-receipt GST liability and its
+  later adjustment - there is no advance-receipt GST tracking anywhere in
+  `rohit_common` today (confirmed by grep during the 2026-08-26
+  `/plan-eng-review`).
+- `DOCISS` reports invoice-number-series ranges issued/cancelled per
+  document type - no document-series tracking exists.
+- `NIL` aggregates nil-rated/exempt supply totals - no such aggregation
+  exists.
+- `EINV` is an e-invoice/IRN summary - would need to cross-check against
+  IRN data already written onto Sales Invoice by `einv.py`, but the shape
+  GSTN expects here hasn't been checked against that.
+
+**Why deferred:** Building these isn't a code fix, it's designing and
+building 3-4 new subsystems (new doctypes, new local queries, and
+reconciliation logic) from scratch, in a tax-compliance-critical doctype,
+with no sample WhiteBooks/GSTN payload in this repo to verify field
+mappings against (same "UNVERIFIED" caveat already flagged in
+`get_gstr1_whitebooks()`'s docstring). Guessing at GSTN's public JSON
+schema from memory and shipping it as reconciliation logic risks silent
+wrong field mappings in a filing-adjacent doctype - worse than the current
+explicit hard-throw.
+
+**Pros:** Completes GSTR1 coverage for all 20 GST return categories -
+today `process_gstr1()` will hard-throw the instant GSTN reports any data
+in one of these 7 (which is only a matter of time for AT/TXP if the
+business ever takes advances, or NIL if it ever has exempt supplies).
+
+**Cons:** Largest, highest-risk item in this doctype's backlog - needs a
+real design pass (`/plan-eng-review` or `/spec`) per category, ideally
+against an actual sample WhiteBooks GSTR1 response, before any schema or
+matching code is written.
+
+**Effort:** L (human ~3-5 days once scoped, per category / CC ~1-2 hrs per
+category once a design + sample payload exist)
+**Priority:** P2
+**Depends on:** A design pass per category, and ideally a real sample
+GSTN/WhiteBooks payload to verify field mappings against - do not
+implement from memory of the public schema alone.
