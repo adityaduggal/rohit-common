@@ -321,6 +321,17 @@ class GSTR1ReturnRIGPL(Document):
             self.set(si, [])
 
 
+def values_differ(local_val, gst_val, tolerance=0.05):
+    # Relative-tolerance comparison, matching the CDN reconciliation check
+    # below - int()-truncating before comparing can produce false mismatches
+    # near integer boundaries (e.g. 100.99 vs 101.00).
+    local_val = flt(local_val)
+    gst_val = flt(gst_val)
+    if gst_val == 0:
+        return abs(local_val) > 0.01
+    return abs(local_val - gst_val) / abs(gst_val) > tolerance
+
+
 def match_and_update_details_from_gstin(gstin_resp, gstr1_doc, act_dict):
     if gstin_resp.get("sply_ty", None):
         # Case of B2C
@@ -346,19 +357,19 @@ def match_and_update_details_from_gstin(gstin_resp, gstr1_doc, act_dict):
                 sgst += inv.sgst
                 cess += inv.cess
                 row_list.append(inv.idx)
-            if int(taxable) != int(flt(gstin_resp.get("txval"))):
+            if values_differ(taxable, gstin_resp.get("txval")):
                 frappe.throw(f"For State Code {gstin_resp.get('pos')} there is a Difference in Taxable Value \
                         GST= {gstin_resp.get('txval')} Our System = {taxable} check rows {str(row_list)}")
-            elif int(igst) != int(flt(gstin_resp.get("iamt"))):
+            elif values_differ(igst, gstin_resp.get("iamt")):
                 frappe.throw(f"For State Code {gstin_resp.get('pos')} there is a Difference in IGST Value \
                         GST= {gstin_resp.get('iamt')} Our System = {igst} check rows {str(row_list)}")
-            elif int(sgst) != int(flt(gstin_resp.get("samt"))):
+            elif values_differ(sgst, gstin_resp.get("samt")):
                 frappe.throw(f"For State Code {gstin_resp.get('pos')} there is a Difference in SGST Value \
                         GST= {gstin_resp.get('samt')} Our System = {sgst} check rows {str(row_list)}")
-            elif int(cgst) != int(flt(gstin_resp.get("camt"))):
+            elif values_differ(cgst, gstin_resp.get("camt")):
                 frappe.throw(f"For State Code {gstin_resp.get('pos')} there is a Difference in CGST Value \
                         GST= {gstin_resp.get('camt')} Our System = {cgst} check rows {str(row_list)}")
-            elif int(cess) != int(flt(gstin_resp.get("csamt"))):
+            elif values_differ(cess, gstin_resp.get("csamt")):
                 frappe.throw(f"For State Code {gstin_resp.get('pos')} there is a Difference in Cess Value \
                         GST= {gstin_resp.get('csamt')} Our System = {cess} check rows {str(row_list)}")
             else:
