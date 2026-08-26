@@ -256,8 +256,8 @@ class GSTR1ReturnRIGPL(Document):
             gst_acc.append(d.cess_account)
         jv_dict = frappe.db.sql("""SELECT jv.name, jvd.account
         FROM `tabJournal Entry` jv, `tabJournal Entry Account` jvd
-        WHERE jvd.parent = jv.name AND jv.docstatus=1 AND jv.posting_date >= '%s' AND jv.posting_date <= '%s'
-        ORDER BY jv.posting_date, jv.name, jvd.idx""" % (start_date, end_date), as_dict=1)
+        WHERE jvd.parent = jv.name AND jv.docstatus=1 AND jv.posting_date >= %(start_date)s AND jv.posting_date <= %(end_date)s
+        ORDER BY jv.posting_date, jv.name, jvd.idx""", {"start_date": start_date, "end_date": end_date}, as_dict=1)
         jv_templ_list = []
         for jv in jv_dict:
             if jv.account in gst_acc:
@@ -280,9 +280,9 @@ class GSTR1ReturnRIGPL(Document):
         update_child_table(doc=self, table_name="cdn_b2b", row_list=cdn_b2b_list)
 
     def get_invoices(self, start_date, end_date):
-        inv_list = frappe.db.sql("""SELECT name FROM `tabSales Invoice` WHERE docstatus = 1 AND posting_date >= '%s'
-        AND posting_date <= '%s' AND company_gstin = '%s'
-        ORDER BY customer, name""" % (start_date, end_date, self.gstin), as_dict=1)
+        inv_list = frappe.db.sql("""SELECT name FROM `tabSales Invoice` WHERE docstatus = 1 AND posting_date >= %(start_date)s
+        AND posting_date <= %(end_date)s AND company_gstin = %(gstin)s
+        ORDER BY customer, name""", {"start_date": start_date, "end_date": end_date, "gstin": self.gstin}, as_dict=1)
         b2b_list = []
         b2cl_list = []
         b2c_list = []
@@ -326,9 +326,14 @@ def match_and_update_details_from_gstin(gstin_resp, gstr1_doc, act_dict):
         # Case of B2C
         si_state_wise = frappe.db.sql("""SELECT gs.name, gs.idx, gs.receiver_address, gs.taxable_value, gs.igst, gs.sgst, gs.cgst, gs.cess
             FROM `tabGSTR1 Return Invoices` gs, `tabAddress` ad1, `tabState` st
-            WHERE gs.receiver_address = ad1.name AND st.name = ad1.state_rigpl AND st.state_code_numeric = '%s'
-            AND gs.parent = '%s' AND gs.parenttype = '%s' AND gs.parentfield = '%s'
-            ORDER BY gs.idx""" % (gstin_resp.get("pos"), gstr1_doc.name, gstr1_doc.doctype, act_dict.get("tbl")), as_dict=1)
+            WHERE gs.receiver_address = ad1.name AND st.name = ad1.state_rigpl AND st.state_code_numeric = %(state_code)s
+            AND gs.parent = %(parent)s AND gs.parenttype = %(parenttype)s AND gs.parentfield = %(parentfield)s
+            ORDER BY gs.idx""", {
+                "state_code": gstin_resp.get("pos"),
+                "parent": gstr1_doc.name,
+                "parenttype": gstr1_doc.doctype,
+                "parentfield": act_dict.get("tbl"),
+            }, as_dict=1)
         if not si_state_wise:
             frappe.throw(f"There is No Data for State Code = {gstin_resp.get('pos')} in our System whereas in GSTIN There is for {act_dict.get('action')}")
         else:
@@ -361,9 +366,13 @@ def match_and_update_details_from_gstin(gstin_resp, gstr1_doc, act_dict):
                     frappe.db.set_value("GSTR1 Return Invoices", inv.name, "invoice_status", get_inv_status(gstin_resp.get('flag')))
                     frappe.db.set_value("GSTR1 Return Invoices", inv.name, "invoice_checksum", gstin_resp.get("chksum"))
     else:
-        si_gstin = frappe.db.sql("""SELECT * FROM `tabGSTR1 Return Invoices` WHERE parent = '%s' AND parenttype = '%s'
-        AND parentfield = '%s' AND receiver_gstin = '%s' ORDER BY idx""" %
-                                 (gstr1_doc.name, gstr1_doc.doctype, act_dict.get("tbl"), gstin_resp.ctin), as_dict=1)
+        si_gstin = frappe.db.sql("""SELECT * FROM `tabGSTR1 Return Invoices` WHERE parent = %(parent)s AND parenttype = %(parenttype)s
+        AND parentfield = %(parentfield)s AND receiver_gstin = %(receiver_gstin)s ORDER BY idx""", {
+            "parent": gstr1_doc.name,
+            "parenttype": gstr1_doc.doctype,
+            "parentfield": act_dict.get("tbl"),
+            "receiver_gstin": gstin_resp.ctin,
+        }, as_dict=1)
         if si_gstin:
             if gstin_resp.get("nt"):
                 if len(si_gstin) != len(gstin_resp.nt):
