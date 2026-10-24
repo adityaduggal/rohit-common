@@ -4,26 +4,6 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "sb0",
-  "tax_pro_asp_id",
-  "tax_pro_password",
-  "gstin",
-  "tax_pro_asp_secret",
-  "auto_validate_gstin_after",
-  "stale_gstin_validation_days",
-  "disable_gstin_validation",
-  "sandbox_mode",
-  "cb0",
-  "enable_eway_for_po",
-  "enable_einvoice",
-  "einvoice_applicable_date",
-  "eway_bill_limit",
-  "eway_bill_id",
-  "eway_bill_password",
-  "api_link",
-  "sandbox_api_link",
-  "access_token",
-  "access_token_time",
   "sb1",
   "roles_allow_pub_att",
   "docs_with_pub_att",
@@ -48,6 +28,24 @@
   "transaction_lock_bypass_role",
   "locked_doctypes",
   "sb8",
+  "gstin",
+  "sandbox_mode",
+  "auto_validate_gstin_after",
+  "stale_gstin_validation_days",
+  "disable_gstin_validation",
+  "enable_einvoice",
+  "einvoice_applicable_date",
+  "eway_bill_limit",
+  "cb8_0",
+  "tax_pro_asp_id",
+  "tax_pro_password",
+  "eway_bill_id",
+  "eway_bill_password",
+  "api_link",
+  "sandbox_api_link",
+  "access_token",
+  "access_token_time",
+  "sb8_1",
   "whitebooks_einv_client_id",
   "whitebooks_einv_client_secret",
   "whitebooks_einv_sandbox_client_id",
@@ -69,75 +67,6 @@
   "whitebooks_webhook_ip_allowlist"
  ],
  "fields": [
-  {
-   "collapsible": 1,
-   "fieldname": "sb0",
-   "fieldtype": "Section Break",
-   "label": "Tax Pro GSP"
-  },
-  {
-   "fieldname": "tax_pro_asp_id",
-   "fieldtype": "Data",
-   "label": "Tax Pro ASP ID"
-  },
-  {
-   "fieldname": "tax_pro_asp_secret",
-   "fieldtype": "Data",
-   "label": "Tax Pro ASP Secret"
-  },
-  {
-   "fieldname": "cb0",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "eway_bill_id",
-   "fieldtype": "Data",
-   "label": "Eway Bill ID"
-  },
-  {
-   "fieldname": "eway_bill_password",
-   "fieldtype": "Data",
-   "label": "Eway Bill Password"
-  },
-  {
-   "fieldname": "tax_pro_password",
-   "fieldtype": "Data",
-   "label": "Tax Pro Password"
-  },
-  {
-   "fieldname": "api_link",
-   "fieldtype": "Data",
-   "label": "API Link"
-  },
-  {
-   "default": "0",
-   "fieldname": "sandbox_mode",
-   "fieldtype": "Check",
-   "label": "Sandbox Mode"
-  },
-  {
-   "fieldname": "sandbox_api_link",
-   "fieldtype": "Data",
-   "label": "Sandbox API Link"
-  },
-  {
-   "fieldname": "gstin",
-   "fieldtype": "Data",
-   "label": "GSTIN"
-  },
-  {
-   "fieldname": "access_token",
-   "fieldtype": "Data",
-   "label": "Access Token",
-   "read_only": 1
-  },
-  {
-   "description": "Validity time for the Access Token and not the time at which it was pulled",
-   "fieldname": "access_token_time",
-   "fieldtype": "Datetime",
-   "label": "Access Token Time",
-   "read_only": 1
-  },
   {
    "collapsible": 1,
    "fieldname": "sb1",
@@ -181,31 +110,6 @@
    "options": "Global Search DocType"
   },
   {
-   "default": "60",
-   "description": "System would automatically validate GSTIN from GST Website after this many days",
-   "fieldname": "auto_validate_gstin_after",
-   "fieldtype": "Int",
-   "in_list_view": 1,
-   "label": "Auto Validate GSTIN After",
-   "reqd": 1
-  },
-  {
-   "default": "90",
-   "description": "No Transactions after this many days of Validation of GSTIN",
-   "fieldname": "stale_gstin_validation_days",
-   "fieldtype": "Int",
-   "in_list_view": 1,
-   "label": "Stale GSTIN Validation Days",
-   "reqd": 1
-  },
-  {
-   "default": "0",
-   "description": "Skips the GSTIN portal check on Address save, in the nightly job, and in transaction validation (SO/PO/SI/PI/PR/Quotation). Use only during a WhiteBooks/GST portal outage.",
-   "fieldname": "disable_gstin_validation",
-   "fieldtype": "Check",
-   "label": "Disable GSTIN Validation"
-  },
-  {
    "collapsible": 1,
    "fieldname": "sb3",
    "fieldtype": "Section Break",
@@ -217,6 +121,10 @@
    "label": "ERPNext App Base Link"
   },
   {
+   "fieldname": "cb3",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "api_key",
    "fieldtype": "Data",
    "label": "API Key"
@@ -225,10 +133,6 @@
    "fieldname": "api_secret",
    "fieldtype": "Data",
    "label": "API Secret"
-  },
-  {
-   "fieldname": "cb3",
-   "fieldtype": "Column Break"
   },
   {
    "collapsible": 1,
@@ -255,6 +159,12 @@
    "label": "Base Link"
   },
   {
+   "description": "Days after which email would be re-verified\nDefault 180 days and Minimum should be 30 days",
+   "fieldname": "email_stale_days",
+   "fieldtype": "Int",
+   "label": "Email Stale Days"
+  },
+  {
    "fieldname": "cb5",
    "fieldtype": "Column Break"
   },
@@ -267,36 +177,6 @@
    "fieldname": "minimum_credits",
    "fieldtype": "Int",
    "label": "Minimum Credits"
-  },
-  {
-   "default": "0",
-   "fieldname": "enable_einvoice",
-   "fieldtype": "Check",
-   "label": "Enable eInvoice"
-  },
-  {
-   "depends_on": "eval:doc.enable_einvoice===1",
-   "fieldname": "eway_bill_limit",
-   "fieldtype": "Int",
-   "label": "eWay Bill Limit"
-  },
-  {
-   "default": "0",
-   "fieldname": "enable_eway_for_po",
-   "fieldtype": "Check",
-   "label": "Enable eWay for PO"
-  },
-  {
-   "depends_on": "eval:doc.enable_einvoice===1",
-   "fieldname": "einvoice_applicable_date",
-   "fieldtype": "Date",
-   "label": "eInvoice Applicable Date"
-  },
-  {
-   "description": "Days after which email would be re-verified\nDefault 180 days and Minimum should be 30 days",
-   "fieldname": "email_stale_days",
-   "fieldtype": "Int",
-   "label": "Email Stale Days"
   },
   {
    "collapsible": 1,
@@ -322,8 +202,117 @@
    "collapsible": 1,
    "fieldname": "sb8",
    "fieldtype": "Section Break",
-   "label": "WhiteBooks GSP",
-   "description": "WhiteBooks issues a separate OAuth2 client_id/client_secret pair per API product (e-Invoice, Public GST, e-Way Bill), each with its own sandbox/production pair. Which pair is used is selected by the shared Sandbox Mode checkbox above (reused, not duplicated per family)."
+   "label": "WhiteBooks GSP / GST Settings",
+   "description": "GST settings shared by the WhiteBooks and the legacy Charteredinfo paths. Sandbox Mode selects the sandbox or production credential pair for every API family below."
+  },
+  {
+   "fieldname": "gstin",
+   "fieldtype": "Data",
+   "label": "GSTIN"
+  },
+  {
+   "default": "0",
+   "fieldname": "sandbox_mode",
+   "fieldtype": "Check",
+   "label": "Sandbox Mode"
+  },
+  {
+   "default": "60",
+   "description": "System would automatically validate GSTIN from GST Website after this many days",
+   "fieldname": "auto_validate_gstin_after",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Auto Validate GSTIN After",
+   "reqd": 1
+  },
+  {
+   "default": "90",
+   "description": "No Transactions after this many days of Validation of GSTIN",
+   "fieldname": "stale_gstin_validation_days",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Stale GSTIN Validation Days",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "description": "Skips the GSTIN portal check on Address save, in the nightly job, and in transaction validation (SO/PO/SI/PI/PR/Quotation). Use only during a WhiteBooks/GST portal outage.",
+   "fieldname": "disable_gstin_validation",
+   "fieldtype": "Check",
+   "label": "Disable GSTIN Validation"
+  },
+  {
+   "default": "0",
+   "fieldname": "enable_einvoice",
+   "fieldtype": "Check",
+   "label": "Enable eInvoice"
+  },
+  {
+   "depends_on": "eval:doc.enable_einvoice===1",
+   "fieldname": "einvoice_applicable_date",
+   "fieldtype": "Date",
+   "label": "eInvoice Applicable Date"
+  },
+  {
+   "depends_on": "eval:doc.enable_einvoice===1",
+   "fieldname": "eway_bill_limit",
+   "fieldtype": "Int",
+   "label": "eWay Bill Limit"
+  },
+  {
+   "fieldname": "cb8_0",
+   "fieldtype": "Column Break",
+   "label": "Legacy Charteredinfo (e-Invoice/e-Way until cutover)"
+  },
+  {
+   "fieldname": "tax_pro_asp_id",
+   "fieldtype": "Data",
+   "label": "Tax Pro ASP ID"
+  },
+  {
+   "fieldname": "tax_pro_password",
+   "fieldtype": "Data",
+   "label": "Tax Pro Password"
+  },
+  {
+   "fieldname": "eway_bill_id",
+   "fieldtype": "Data",
+   "label": "Eway Bill ID"
+  },
+  {
+   "fieldname": "eway_bill_password",
+   "fieldtype": "Data",
+   "label": "Eway Bill Password"
+  },
+  {
+   "fieldname": "api_link",
+   "fieldtype": "Data",
+   "label": "API Link"
+  },
+  {
+   "fieldname": "sandbox_api_link",
+   "fieldtype": "Data",
+   "label": "Sandbox API Link"
+  },
+  {
+   "fieldname": "access_token",
+   "fieldtype": "Data",
+   "label": "Access Token",
+   "read_only": 1
+  },
+  {
+   "description": "Validity time for the Access Token and not the time at which it was pulled",
+   "fieldname": "access_token_time",
+   "fieldtype": "Datetime",
+   "label": "Access Token Time",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "sb8_1",
+   "fieldtype": "Section Break",
+   "label": "WhiteBooks API Credentials",
+   "description": "WhiteBooks issues a separate OAuth2 client_id/client_secret pair per API product (e-Invoice, Public GST, e-Way Bill), each with its own sandbox/production pair."
   },
   {
    "fieldname": "whitebooks_einv_client_id",
