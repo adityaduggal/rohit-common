@@ -348,14 +348,16 @@ def is_gstin_validation_disabled():
     return bool(frappe.db.get_single_value("Rohit Settings", "disable_gstin_validation"))
 
 
-def validate_gstin_from_portal(doc, auto_days=None):
+def validate_gstin_from_portal(doc, auto_days=None, gstin_json=None):
     """
     Validates GSTIN from GST Portal
 
     `auto_days` lets a caller iterating many Address docs (e.g. the
     auto_update_gstin_status scheduled task) fetch the Rohit Settings value
     once outside the loop instead of this function re-fetching it per call.
-    Single-document callers (e.g. the Address validate hook) can omit it.
+    `gstin_json` lets that caller pass an already-fetched portal reply, so
+    Addresses sharing a GSTIN cost one API call. Single-document callers
+    (e.g. the Address validate hook) can omit both.
     """
     if auto_days is None:
         auto_days = flt(frappe.get_value("Rohit Settings", "Rohit Settings",
@@ -385,7 +387,8 @@ def validate_gstin_from_portal(doc, auto_days=None):
         # Success payload is wrapped as {"status_cd": "1", "data": {gstin, sts,
         # lgnm, ...}} (confirmed 2026-10-24 from BGH-653's stored reply) - the
         # same envelope a0900a9 unwrapped for GST Return Status.
-        gstin_json = search_gstin_whitebooks(doc.gstin)
+        if gstin_json is None:
+            gstin_json = search_gstin_whitebooks(doc.gstin)
         doc.gstin_json_reply = str(gstin_json)
         if gstin_json.get("status_cd") == "1":
             gst_data = gstin_json.get("data") or {}

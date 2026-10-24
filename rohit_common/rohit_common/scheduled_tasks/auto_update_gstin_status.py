@@ -5,10 +5,12 @@
 from __future__ import unicode_literals
 import frappe
 import time
-from datetime import date
-from frappe.utils import flt, getdate
+from frappe.utils import flt
 from frappe.utils.background_jobs import enqueue
+from ..india_gst_api.gst_public_api import search_gstin_whitebooks
 from ..validations.address import validate_gstin_from_portal, is_gstin_validation_disabled
+
+COMMIT_EVERY = 50
 
 
 def enqueue_gstin_update():
@@ -19,47 +21,52 @@ def execute():
     if is_gstin_validation_disabled():
         print("GSTIN Validation is Disabled in Rohit Settings hence Skipping")
         return
-    st_time = time.time()
-    validate = 0
     auto_days = flt(frappe.get_value("Rohit Settings", "Rohit Settings", "auto_validate_gstin_after"))
-    query = """SELECT name, validated_gstin, disabled,
-        IFNULL(gst_validation_date, '1900-01-01') as gst_validation_date, gstin, gst_status
+    if auto_days <= 0:
+        # flt(None) = 0 would match every Address every day and burn API quota
+        print("Auto Validate GSTIN After is not set in Rohit Settings hence Skipping")
+        return
+    query = """SELECT name, gstin, IFNULL(gst_validation_date, '1900-01-01') as gst_validation_date
     FROM `tabAddress`
-    WHERE gstin IS NOT NULL AND gstin != "NA" AND disabled=0 AND country = 'India'
+    WHERE gstin IS NOT NULL AND gstin != 'NA' AND disabled=0 AND country = 'India'
     AND (validated_gstin IS NULL OR DATE_ADD(IFNULL(gst_validation_date, '1900-01-01'), INTERVAL %(auto_days)s DAY) < CURDATE())
     ORDER BY gstin, name"""
-
     add_list = frappe.db.sql(query, {"auto_days": auto_days}, as_dict=1)
+    update_addresses(add_list, auto_days)
 
+
+def update_addresses(add_list, auto_days):
+    """
+    Validates and saves each Address from the GST portal. Each Address is its own unit:
+    a failure rolls back only that Address (savepoint) and the loop continues. Addresses
+    sharing a GSTIN reuse one portal response, so each GSTIN costs one API call per run.
+    """
+    st_time = time.time()
+    portal_replies = {}
+    saved, failed, since_commit = 0, 0, 0
     for add in add_list:
         print(f"Checking Address with GSTIN {add.gstin} with Validation Date {add.gst_validation_date}")
-        changes_made = 0
-        if add.gst_validation_date:
-            if add.validated_gstin:
-                days_since_validation = (date.today() - getdate(add.gst_validation_date)).days
-            else:
-                days_since_validation = (date.today() - getdate('1900-01-01')).days
-            if days_since_validation > auto_days:
-                # Now Validate the GSTIN
-                add_doc = frappe.get_doc("Address", add.name)
-                validate_gstin_from_portal(add_doc, auto_days=auto_days)
-                changes_made = 1
-                validate += 1
-        else:
-            changes_made = 1
+        frappe.db.savepoint("gstin_addr")
+        try:
+            if add.gstin not in portal_replies:
+                portal_replies[add.gstin] = search_gstin_whitebooks(add.gstin)
             add_doc = frappe.get_doc("Address", add.name)
-            validate_gstin_from_portal(add_doc, auto_days=auto_days)
-            validate += 1
-        if changes_made == 1:
-            try:
-                add_doc.flags.ignore_mandatory = True
-                add_doc.save()
-                print(f"{add_doc.name} Saved")
-            except Exception as e:
-                print(f"{e}")
-        if validate % 50 == 0 and validate > 0:
-            print(f"Committing Changes after {validate} Changes. Time Elapsed = {int(time.time() - st_time)} seconds")
-            time.sleep(2)
+            validate_gstin_from_portal(add_doc, auto_days=auto_days, gstin_json=portal_replies[add.gstin])
+            add_doc.flags.ignore_mandatory = True
+            add_doc.save()
+            saved += 1
+            since_commit += 1
+            print(f"{add_doc.name} Saved")
+        except Exception:
+            frappe.db.rollback(save_point="gstin_addr")
+            failed += 1
+            frappe.log_error(frappe.get_traceback(), f"GSTIN Auto Update Failed for {add.name}")
+        if since_commit >= COMMIT_EVERY:
+            print(f"Committing Changes after {saved} Changes. Time Elapsed = {int(time.time() - st_time)} seconds")
             frappe.db.commit()
-    print(f"Total GSTIN validated from GSTIN Website {validate}")
+            since_commit = 0
+            time.sleep(2)
+    frappe.db.commit()
+    print(f"Total GSTIN validated from GSTIN Website {saved}, Failed {failed}")
     print(f"Total Time Taken = {int(time.time() - st_time)} seconds")
+    return saved, failed
