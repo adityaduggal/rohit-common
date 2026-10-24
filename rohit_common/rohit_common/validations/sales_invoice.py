@@ -378,9 +378,14 @@ def validate_address(add_doc):
 
 def check_validated_gstin(add_name, doc=None):
     # If the Validation Date for GSTIN Validation is more than 90 days then Don't allow and aks for Revalidation
-    stale_days = flt(frappe.get_value("Rohit Settings", "Rohit Settings", "stale_gstin_validation_days"))
-    add_doc = frappe.get_doc("Address", add_name)
-    status = ""
+    if not add_name:
+        return
+    stale_days = flt(frappe.db.get_single_value("Rohit Settings", "stale_gstin_validation_days"))
+    add_doc = frappe.db.get_value("Address", add_name, ["name", "gstin", "validated_gstin", "gst_status",
+        "gst_validation_date"], as_dict=1)
+    if not add_doc:
+        frappe.throw(f"Address {add_name} does not exist", frappe.DoesNotExistError)
+    add_doc.doctype = "Address"
     if add_doc.gstin:
         if add_doc.gstin != "NA":
             if add_doc.gst_validation_date:
@@ -407,7 +412,6 @@ def check_validated_gstin(add_name, doc=None):
                         frappe.msgprint(f"For {frappe.get_desk_link('Address', add_name)}, GSTIN: {add_doc.gstin} is "
                                         f"{add_doc.gst_status} hence {doc.name} being made can get Stuck Later")
             elif add_doc.gst_status in ("Cancelled", "Inactive"):
-                add_doc.disabled = 1
                 if doc:
                     frappe.throw(f"For {frappe.get_desk_link('Address', add_name)} GSTIN: {add_doc.gstin} is "
                                  f"{add_doc.gst_status} hence Not Allowed to Make {doc.doctype}")

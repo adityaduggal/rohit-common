@@ -367,11 +367,21 @@ def validate_gstin_from_portal(doc, auto_days=None):
         # a success body are still unconfirmed (no 200 example seen yet) but
         # assumed unchanged, since that part of the shape is the same GSTN
         # schema the failure body's status_cd convention came from.
+        #
+        # Success payload is wrapped as {"status_cd": "1", "data": {gstin, sts,
+        # lgnm, ...}} (confirmed 2026-10-24 from BGH-653's stored reply) - the
+        # same envelope a0900a9 unwrapped for GST Return Status.
         gstin_json = search_gstin_whitebooks(doc.gstin)
         doc.gstin_json_reply = str(gstin_json)
         if gstin_json.get("status_cd") == "1":
-            doc.validated_gstin = gstin_json.get("gstin")
-            doc.gst_status = gstin_json.get("sts")
+            gst_data = gstin_json.get("data") or {}
+            if not gst_data.get("gstin"):
+                # Never stamp a validation date without a status, else the
+                # address looks freshly validated but blocks every transaction.
+                frappe.msgprint(f"GSTIN validation for {doc.gstin} returned no taxpayer data: {gstin_json}")
+                return
+            doc.validated_gstin = gst_data.get("gstin")
+            doc.gst_status = gst_data.get("sts")
             doc.gst_validation_date = date.today()
         else:
             # Was `exit()` (kills the worker process, not just this call) -
@@ -387,13 +397,9 @@ def validate_gstin_from_portal(doc, auto_days=None):
         doc.disabled = 1
     elif doc.gst_status == 'Suspended':
         # Disable the address for Supplier or unlinked address
-        dl_list = frappe.db.sql(f"""SELECT name, link_doctype FROM `tabDynamic Link`
-            WHERE parenttype = 'Address'  AND parent = '{doc.name}'""", as_dict=1)
-        if dl_list:
-            for dt in dl_list:
-                if dt.link_doctype == 'Supplier':
-                    doc.disabled = 1
-        else:
+        link_doctypes = frappe.get_all("Dynamic Link", pluck="link_doctype",
+            filters={"parenttype": "Address", "parent": doc.name})
+        if not link_doctypes or "Supplier" in link_doctypes:
             doc.disabled = 1
     update_address_title_from_gstin_json(doc)
 
@@ -405,10 +411,11 @@ def update_address_title_from_gstin_json(doc):
     if doc.validated_gstin:
         if doc.validated_gstin == doc.gstin:
             gst_json = ast.literal_eval(doc.gstin_json_reply)
-            if gst_json.get("status_cd", 1) == 1:
+            if gst_json.get("status_cd") == "1":
                 # Now Check the Legal Name lgnm and Also another field is Trade Name (tradeNam)
-                lgl_name = gst_json.get("lgnm")
-                trd_name = gst_json.get("tradeNam")
+                gst_data = gst_json.get("data") or {}
+                lgl_name = gst_data.get("lgnm") or ""
+                trd_name = gst_data.get("tradeNam") or ""
                 lgl_ratio = sm(lambda x: x in (" ", ".", ",", "(", ")"), (doc.address_title).lower(),
                                lgl_name.lower()).ratio()
                 trd_ratio = sm(lambda x: x in (" ", ".", ",", "(", ")"), (doc.address_title).lower(),
