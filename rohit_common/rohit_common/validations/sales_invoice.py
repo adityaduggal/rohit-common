@@ -8,6 +8,7 @@ import frappe
 from datetime import date
 from frappe.utils import getdate, flt
 from frappe.utils.background_jobs import enqueue
+from .address import is_gstin_validation_disabled
 from ...utils.rohit_common_utils import replace_java_chars, check_dynamic_link, \
     check_sales_taxes_integrity, remove_html
 
@@ -378,7 +379,7 @@ def validate_address(add_doc):
 
 def check_validated_gstin(add_name, doc=None):
     # If the Validation Date for GSTIN Validation is more than 90 days then Don't allow and aks for Revalidation
-    if not add_name:
+    if not add_name or is_gstin_validation_disabled():
         return
     stale_days = flt(frappe.db.get_single_value("Rohit Settings", "stale_gstin_validation_days"))
     add_doc = frappe.db.get_value("Address", add_name, ["name", "gstin", "validated_gstin", "gst_status",

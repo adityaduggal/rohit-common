@@ -76,7 +76,8 @@ def gstin_validation(doc):
                     else:
                         frappe.throw("State Selected {0} for Address {1}, GSTIN number should begin with {2}".
                                      format(doc.state_rigpl, doc.name, state.state_code_numeric))
-                validate_gstin_from_portal(doc)
+                if not is_gstin_validation_disabled():
+                    validate_gstin_from_portal(doc)
             doc.pan = doc.gstin[2:12]
         else:
             doc.pan = ""
@@ -332,6 +333,15 @@ def update_fields_from_gmaps(doc, address_dict):
     else:
         doc.dont_update_from_google = 1
         remove_google_updates(doc)
+
+
+def is_gstin_validation_disabled():
+    """
+    Rohit Settings kill-switch for every GSTIN portal check: Address save, the
+    nightly auto_update_gstin_status job and check_validated_gstin() on
+    transactions. Meant for WhiteBooks/GST portal outages.
+    """
+    return bool(frappe.db.get_single_value("Rohit Settings", "disable_gstin_validation"))
 
 
 def validate_gstin_from_portal(doc, auto_days=None):

@@ -11,6 +11,7 @@
   "tax_pro_asp_secret",
   "auto_validate_gstin_after",
   "stale_gstin_validation_days",
+  "disable_gstin_validation",
   "sandbox_mode",
   "cb0",
   "enable_eway_for_po",
@@ -196,6 +197,13 @@
    "in_list_view": 1,
    "label": "Stale GSTIN Validation Days",
    "reqd": 1
+  },
+  {
+   "default": "0",
+   "description": "Skips the GSTIN portal check on Address save, in the nightly job, and in transaction validation (SO/PO/SI/PI/PR/Quotation). Use only during a WhiteBooks/GST portal outage.",
+   "fieldname": "disable_gstin_validation",
+   "fieldtype": "Check",
+   "label": "Disable GSTIN Validation"
   },
   {
    "collapsible": 1,
@@ -417,7 +425,7 @@
   }
  ],
  "issingle": 1,
- "modified": "2026-08-22 00:00:00.000000",
+ "modified": "2026-10-24 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "Rohit Settings",

@@ -8,7 +8,7 @@ import time
 from datetime import date
 from frappe.utils import flt, getdate
 from frappe.utils.background_jobs import enqueue
-from ..validations.address import validate_gstin_from_portal
+from ..validations.address import validate_gstin_from_portal, is_gstin_validation_disabled
 
 
 def enqueue_gstin_update():
@@ -16,6 +16,9 @@ def enqueue_gstin_update():
 
 
 def execute():
+    if is_gstin_validation_disabled():
+        print("GSTIN Validation is Disabled in Rohit Settings hence Skipping")
+        return
     st_time = time.time()
     validate = 0
     auto_days = flt(frappe.get_value("Rohit Settings", "Rohit Settings", "auto_validate_gstin_after"))
