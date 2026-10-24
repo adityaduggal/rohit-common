@@ -7,7 +7,7 @@ import frappe
 import re
 import ast
 from datetime import date
-from frappe.utils import flt, getdate
+from frappe.utils import flt, getdate, now
 from difflib import SequenceMatcher as sm
 from .google_maps import update_doc_json_from_geocode, render_gmap_json_text
 from ..india_gst_api.gst_public_api import search_gstin_whitebooks
@@ -236,8 +236,12 @@ def unset_other(doc, is_address_type):
     """
     If current address is Primary then other is unset
     """
-    for add in _other_linked_addresses(doc):
-        frappe.db.set_value(doc.doctype, add, is_address_type, 0)
+    other_addresses = _other_linked_addresses(doc)
+    if other_addresses:
+        # is_address_type is a hardcoded fieldname from validate_primary/shipping_address
+        address = frappe.qb.DocType("Address")
+        frappe.qb.update(address).set(address[is_address_type], 0).set(address.modified, now()).set(
+            address.modified_by, frappe.session.user).where(address.name.isin(other_addresses)).run()
 
 
 def check_set(doc, is_address_type):

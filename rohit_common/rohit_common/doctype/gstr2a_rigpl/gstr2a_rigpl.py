@@ -5,7 +5,7 @@ from __future__ import unicode_literals
 import frappe
 import json
 from datetime import datetime
-from frappe.utils import flt, getdate
+from frappe.utils import flt, getdate, now
 from ...india_gst_api.common import gst_return_period_validation, validate_gstin
 from ...india_gst_api.gst_api import get_invoice_type, get_type_of_amend, get_gstr2a, get_gstr2b
 from frappe.model.document import Document
@@ -123,15 +123,18 @@ class GSTR2ARIGPL(Document):
         for r in gstr2_rows:
             rows_by_invoice_no.setdefault(r.supplier_invoice_no, []).append(r)
 
+        row_names = []
         for inv in invoices:
             inv_no = inv.get(inv_no_field)
             matched = rows_by_invoice_no.get(inv_no, [])
             if len(matched) < 1:
                 frappe.throw(f"No GSTR2 Data found for GSTIN: {row} and {dt}")
             else:
-                for m in matched:
-                    frappe.db.set_value("GSTR2 Return Invoices", m.row_name, "gstr2b_date", gstr2b_date)
-                    frappe.db.set_value("GSTR2 Return Invoices", m.row_name, "gstr2b_period", self.return_period)
+                row_names.extend(m.row_name for m in matched)
+        # One UPDATE for all matched rows instead of two set_value() calls per row
+        gri = frappe.qb.DocType("GSTR2 Return Invoices")
+        frappe.qb.update(gri).set(gri.gstr2b_date, gstr2b_date).set(gri.gstr2b_period, self.return_period).set(
+            gri.modified, now()).set(gri.modified_by, frappe.session.user).where(gri.name.isin(row_names)).run()
 
     def analyse_data(self, dont_save=0):
         self.link_docs()

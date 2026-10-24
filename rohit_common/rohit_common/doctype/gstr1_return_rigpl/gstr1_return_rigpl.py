@@ -7,7 +7,7 @@ import frappe
 import json
 from datetime import datetime
 from frappe.model.document import Document
-from frappe.utils import getdate, flt
+from frappe.utils import getdate, flt, now
 from erpnext.accounts.utils import get_fiscal_year
 from ....utils.common import update_child_table
 from ....utils.rohit_common_utils import check_dynamic_link
@@ -356,9 +356,11 @@ def match_and_update_details_from_gstin(gstin_resp, gstr1_doc, act_dict):
                 frappe.throw(f"For State Code {gstin_resp.get('pos')} there is a Difference in Cess Value \
                         GST= {gstin_resp.get('csamt')} Our System = {cess} check rows {str(row_list)}")
             else:
-                for inv in si_state_wise:
-                    frappe.db.set_value("GSTR1 Return Invoices", inv.name, "invoice_status", get_inv_status(gstin_resp.get('flag')))
-                    frappe.db.set_value("GSTR1 Return Invoices", inv.name, "invoice_checksum", gstin_resp.get("chksum"))
+                # One UPDATE for every state-wise row (same values) instead of two set_value() calls per row
+                gri = frappe.qb.DocType("GSTR1 Return Invoices")
+                frappe.qb.update(gri).set(gri.invoice_status, get_inv_status(gstin_resp.get('flag'))).set(
+                    gri.invoice_checksum, gstin_resp.get("chksum")).set(gri.modified, now()).set(
+                    gri.modified_by, frappe.session.user).where(gri.name.isin([inv.name for inv in si_state_wise])).run()
     else:
         si_gstin = frappe.db.sql("""SELECT * FROM `tabGSTR1 Return Invoices` WHERE parent = '%s' AND parenttype = '%s'
         AND parentfield = '%s' AND receiver_gstin = '%s' ORDER BY idx""" %
@@ -430,9 +432,9 @@ def check_invoice_integrity(gst_inv_data, local_inv_data):
                     frappe.throw(f"For Row# {row.idx} Total Invoice Value does "
                                  f"not Match with GST Network Inv Value <b>{inv.get('val')}</b>")
                 else:
-                    frappe.db.set_value("GSTR1 Return Invoices", row.name, "invoice_status",
-                                        get_inv_status(inv.get('flag')))
-                    frappe.db.set_value("GSTR1 Return Invoices", row.name, "invoice_checksum", inv.get("chksum"))
+                    frappe.db.set_value("GSTR1 Return Invoices", row.name, {
+                        "invoice_status": get_inv_status(inv.get('flag')),
+                        "invoice_checksum": inv.get("chksum")})
         else:
             if inv.get("nt_num"):
                 # Case of Credit and Debit Notes Registered
@@ -448,11 +450,10 @@ def check_invoice_integrity(gst_inv_data, local_inv_data):
                         frappe.throw(f"For Row# {row.idx} Invoice Date does not Match with GST Network "
                                      f"Inv Date <b>{gst_inv_date}</b>")
                     else:
-                        frappe.db.set_value("GSTR1 Return Invoices", row.name, "invoice_status",
-                                            get_inv_status(inv.get('flag')))
-                        frappe.db.set_value("GSTR1 Return Invoices", row.name, "uploaded_by",
-                                            get_invoice_uploader(inv.get('updby')))
-                        frappe.db.set_value("GSTR1 Return Invoices", row.name, "invoice_checksum", inv.get("chksum"))
+                        frappe.db.set_value("GSTR1 Return Invoices", row.name, {
+                            "invoice_status": get_inv_status(inv.get('flag')),
+                            "uploaded_by": get_invoice_uploader(inv.get('updby')),
+                            "invoice_checksum": inv.get("chksum")})
             else:
                 base_doc_no = get_base_doc_frm_docname(dt=row.document_type, dn=inv.get("inum"))
                 if base_doc_no == row.invoice_number:
@@ -465,11 +466,10 @@ def check_invoice_integrity(gst_inv_data, local_inv_data):
                         frappe.throw(f"For Row# {row.idx} Invoice Date does not Match with GST Network "
                                      f"Inv Date <b>{gst_inv_date}</b>")
                     else:
-                        frappe.db.set_value("GSTR1 Return Invoices", row.name, "invoice_status",
-                                            get_inv_status(inv.get('flag')))
-                        frappe.db.set_value("GSTR1 Return Invoices", row.name, "uploaded_by",
-                                            get_invoice_uploader(inv.get('updby')))
-                        frappe.db.set_value("GSTR1 Return Invoices", row.name, "invoice_checksum", inv.get("chksum"))
+                        frappe.db.set_value("GSTR1 Return Invoices", row.name, {
+                            "invoice_status": get_inv_status(inv.get('flag')),
+                            "uploaded_by": get_invoice_uploader(inv.get('updby')),
+                            "invoice_checksum": inv.get("chksum")})
     if inv_found != 1:
         if inv.get("nt_num"):
             inv_no = inv.get("nt_num")

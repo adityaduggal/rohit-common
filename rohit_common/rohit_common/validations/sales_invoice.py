@@ -234,12 +234,18 @@ def get_item_synopsis(doc):
 def check_delivery_note_rule(doc):
     dn_dict = frappe._dict()
     list_of_dn_dict = []
+    # Batched lookups instead of a get_doc/get_value per row (one query each)
+    no_dn_items = list({d.item_code for d in doc.items if d.delivery_note is None})
+    stock_items = set(frappe.get_all("Item", pluck="name",
+        filters={"name": ["in", no_dn_items], "is_stock_item": 1})) if no_dn_items else set()
+    dn_details = [d.dn_detail for d in doc.items if d.delivery_note is not None]
+    dn_qty_map = {r.name: r.qty for r in frappe.get_all("Delivery Note Item", fields=["name", "qty"],
+        filters={"name": ["in", dn_details]})} if dn_details else {}
 
     for d in doc.items:
         # Stock Items without DN would need Update Stock Check
         if d.delivery_note is None:
-            item_doc = frappe.get_doc('Item', d.item_code)
-            if item_doc.is_stock_item == 1 and doc.update_stock != 1:
+            if d.item_code in stock_items and doc.update_stock != 1:
                 frappe.throw(("Item Code {0} in Row # {1} is Stock Item without any DN so please check "
                               "Update Stock Button").format(d.item_code, d.idx))
 
@@ -259,17 +265,18 @@ def check_delivery_note_rule(doc):
             Hence making of Invoice is DENIED""").format(d.idx, d.delivery_note))
         # For DN items quantities should be same
         if d.delivery_note is not None:
-            dn_qty = frappe.db.get_value('Delivery Note Item', d.dn_detail, 'qty')
+            dn_qty = dn_qty_map.get(d.dn_detail)
             if dn_qty != d.qty:
                 frappe.throw("Invoice Qty should be equal to DN quantity of {0} at Row # {1}".format(dn_qty, d.idx))
     if list_of_dn_dict:
-        unique_dn = {v['dn']: v for v in list_of_dn_dict}.values()
-        for dn in unique_dn:
-            dn_doc = frappe.get_doc('Delivery Note', dn.dn)
-            for d in dn_doc.items:
-                if not any(x['dn_detail'] == d.name for x in list_of_dn_dict):
-                    frappe.throw(("Item No: {0} with Item Code: {1} in DN# {2} is not mentioned in "
-                                  "SI# {3}").format(d.idx, d.item_code, dn_doc.name, doc.name))
+        unique_dn = list({v['dn'] for v in list_of_dn_dict})
+        si_dn_details = {x['dn_detail'] for x in list_of_dn_dict}
+        dn_items = frappe.get_all("Delivery Note Item", fields=["name", "idx", "item_code", "parent"],
+            filters={"parent": ["in", unique_dn], "parenttype": "Delivery Note"}, order_by="parent, idx")
+        for d in dn_items:
+            if d.name not in si_dn_details:
+                frappe.throw(("Item No: {0} with Item Code: {1} in DN# {2} is not mentioned in "
+                              "SI# {3}").format(d.idx, d.item_code, d.parent, doc.name))
 
 
 def update_item_table(it_list, item_row):
