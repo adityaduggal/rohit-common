@@ -218,7 +218,9 @@ def log_bypass_access(doc, user):
     checks, so repeats in the same request are skipped without a query.
     """
     key = (user, doc.doctype, doc.name)
-    logged = frappe.flags.setdefault("transaction_lock_logged", set())
+    logged = frappe.flags.transaction_lock_logged
+    if logged is None:
+        logged = frappe.flags.transaction_lock_logged = set()
     if key in logged:
         return
     logged.add(key)

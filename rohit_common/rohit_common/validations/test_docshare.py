@@ -21,12 +21,13 @@ class TestFolderShare(unittest.TestCase):
 
 	@classmethod
 	def setUpClass(cls):
-		for email in TEST_USERS:
+		# Each user needs its own first name: Frappe names the User's Contact after it
+		for idx, email in enumerate(TEST_USERS):
 			if not frappe.db.exists("User", email):
 				frappe.get_doc({
 					"doctype": "User",
 					"email": email,
-					"first_name": "DocShare Test",
+					"first_name": f"DocShare Test {idx}",
 					"send_welcome_email": 0,
 				}).insert(ignore_permissions=True)
 		frappe.db.commit()
