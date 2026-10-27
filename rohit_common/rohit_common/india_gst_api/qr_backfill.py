@@ -20,12 +20,12 @@ Imports are local so this module imports cleanly without them.
 """
 import importlib
 import random
+import sys
 from collections import defaultdict
 
 import frappe
 
 MIN_VALID_QR_LENGTH = 50
-BATCH_SIZE = 500
 # Module name -> pip package name, as listed in requirements.txt.
 REQUIRED_PACKAGES = {"zxingcpp": "zxing-cpp", "PIL": "Pillow", "pyqrcode": "pyqrcode", "png": "pypng"}
 FILE_URL_FOLDERS = (("/private/files/", "private"), ("/files/", "public"))
@@ -169,14 +169,15 @@ def sample_decode_check(sample_size=50):
     }
 
 
-def backfill_signed_qr_code(batch_size=BATCH_SIZE):
+def backfill_signed_qr_code():
     """Decode every candidate invoice's QR PNG and write signed_qr_code via
     db.set_value (no hooks fire; modified is not touched). Idempotent: only
     invoices with an empty signed_qr_code are selected, so a re-run after
     restoring missing files only touches the rows still left.
 
-    Commits after every batch so a crash keeps the finished work. Failures
-    don't raise; they go into the returned report and one Error Log entry.
+    Commits after each invoice, so an interrupted run keeps its work and the
+    next run continues from there. Failures don't raise; they go into the
+    returned report and one Error Log entry.
 
     Returns a dict: {total, backfilled, failed, failures: [{name, error}]}.
     """
@@ -185,6 +186,7 @@ def backfill_signed_qr_code(batch_size=BATCH_SIZE):
     total = len(candidates)
     backfilled = 0
     failures = []
+    print(f"QR backfill: {total} invoices to backfill", flush=True)
 
     for index, row in enumerate(candidates, start=1):
         decoded, error = decode_qr_image(row["qrcode_image"])
@@ -192,20 +194,21 @@ def backfill_signed_qr_code(batch_size=BATCH_SIZE):
             frappe.db.set_value(
                 "Sales Invoice", row["name"], "signed_qr_code", decoded, update_modified=False
             )
+            frappe.db.commit()
             backfilled += 1
         else:
             failures.append({"name": row["name"], "error": error})
+        _print_progress(index, total, backfilled, len(failures))
 
-        if index % batch_size == 0 or index == total:
-            frappe.db.commit()
-            print(f"QR backfill: {index}/{total} processed, {backfilled} backfilled, {len(failures)} failed")
-
+    if total:
+        sys.stdout.write("\n")
     if failures:
         _log_failures(failures)
 
     print(
         f"QR backfill complete: {backfilled}/{total} invoices backfilled, {len(failures)} failed"
-        + (" (see Error Log, title 'QR backfill: invoices not backfilled')." if failures else ".")
+        + (" (see Error Log, title 'QR backfill: invoices not backfilled')." if failures else "."),
+        flush=True,
     )
     return {
         "total": total,
@@ -213,6 +216,15 @@ def backfill_signed_qr_code(batch_size=BATCH_SIZE):
         "failed": len(failures),
         "failures": failures,
     }
+
+
+def _print_progress(index, total, backfilled, failed):
+    """One live status line, rewritten in place after every invoice."""
+    sys.stdout.write(
+        f"\rQR backfill: {index}/{total} ({index * 100 // total}%) processed, "
+        f"{backfilled} backfilled, {failed} failed"
+    )
+    sys.stdout.flush()
 
 
 def _log_failures(failures):

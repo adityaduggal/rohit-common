@@ -26,7 +26,11 @@ do not add a second file.
      the same pyqrcode settings as `einv.attach_qrcode()`. This proves that the
      print formats will draw the same QR;
    - writes `signed_qr_code` with `db.set_value` (`modified` does not change).
-4. It commits every 500 invoices and prints the progress.
+4. Before it starts, it prints how many invoices it must backfill. During the
+   run, one status line updates after each invoice:
+   `QR backfill: 1200/26143 (4%) processed, 1150 backfilled, 50 failed`.
+   It commits after each backfilled invoice, so if you stop the run, the next
+   run continues with the invoices that are left.
 5. Invoices that fail (for example, a file missing on disk) do **not** fail the
    patch. One Error Log entry, titled `QR backfill: invoices not backfilled`,
    lists them grouped by reason.

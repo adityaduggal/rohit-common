@@ -171,7 +171,7 @@ class TestBackfillSignedQrCode(QrFileTestCase):
         self.addCleanup(candidates_patch.stop)
 
     def test_backfills_and_reports_failures(self):
-        report = qr_backfill.backfill_signed_qr_code(batch_size=1)
+        report = qr_backfill.backfill_signed_qr_code()
 
         self.assertEqual(frappe.db.get_value("Sales Invoice", self.si_ok, "signed_qr_code"), SIGNED_QR)
         self.assertFalse(frappe.db.get_value("Sales Invoice", self.si_missing, "signed_qr_code"))
