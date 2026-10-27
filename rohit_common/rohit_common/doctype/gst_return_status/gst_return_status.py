@@ -16,6 +16,7 @@ class GSTReturnStatus(Document):
 
 	@frappe.whitelist()
 	def get_return_status(self):
+		self.check_permission("write")
 		today = datetime.today()
 		self.returns = []
 		if self.fiscal_year:

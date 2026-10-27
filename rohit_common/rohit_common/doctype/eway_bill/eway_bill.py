@@ -27,6 +27,7 @@ class eWayBill(Document):
         Creates an Eway Bill for an Eway Bill Doc. If the document already has one,
         create_ewb_from_json() returns that one.
         """
+        self.check_permission("write")
         if not self.json_reply and not self.eway_bill_no:
             ewb_json = self.get_ewb_json(self.document_type, self.document_number)
             json_reply = create_ewb_from_json(ewb_json)
@@ -42,6 +43,7 @@ class eWayBill(Document):
 
     @frappe.whitelist()
     def update_ewb_partb(self):
+        self.check_permission("write")
         if not self.valid_upto:
             # Update Part-B
             res_json = update_partb_ewb(self)
@@ -52,6 +54,7 @@ class eWayBill(Document):
         """
         Gets the EWay Bill Details for a eWay Bill No
         """
+        self.check_permission("write")
         if self.eway_bill_no:
             json_reply = get_eway_bill_details(self.eway_bill_no)
             self.db_set("json_reply", json.dumps(json_reply))
@@ -323,6 +326,7 @@ class eWayBill(Document):
     def extend_eway_validity(self):
         # eWay bill validity can only be extended by Transporter or if No Transporter is defined then by Generator
         # eWay bill validity can only be extended 8 hrs before or after expiry of eWay Bill
+        self.check_permission("write")
         if self.eway_bill_no and self.valid_upto:
             valid_upto = get_datetime(self.valid_upto)
             upper_limit = valid_upto + timedelta(hours=8)
@@ -342,6 +346,7 @@ class eWayBill(Document):
         Cancels the e-Way Bill on the GST system. Only possible within 24 hours of
         its generation. Cancel the invoice first.
         """
+        self.check_permission("cancel")
         if self.eway_bill_no:
             if get_datetime(self.eway_bill_date) + timedelta(hours=24) > datetime.now():
                 cancel_ewb_on_portal(self.eway_bill_no, remark=f"Cancelled in ERP by {frappe.session.user}")

@@ -269,6 +269,7 @@ class GSTR1ReturnRIGPL(Document):
 
     @frappe.whitelist()
     def get_details(self):
+        self.check_permission("write")
         self.clear_all_tables()
         self.generate_gstr1()
         self.save()
@@ -353,6 +354,7 @@ class GSTR1ReturnRIGPL(Document):
 
     @frappe.whitelist()
     def clear_all_tables(self):
+        self.check_permission("write")
         self.synopsis_text = ""
         for si in SI_TABLES + ["hsn_summary"]:
             self.set(si, [])

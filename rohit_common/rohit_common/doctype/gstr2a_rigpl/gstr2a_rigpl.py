@@ -28,6 +28,7 @@ class GSTR2ARIGPL(Document):
 
     @frappe.whitelist()
     def reset_matching(self):
+        self.check_permission("write")
         for d in self.invoices:
             d.fully_matched = 0
         self.analyse_data(dont_save=1)
@@ -44,6 +45,7 @@ class GSTR2ARIGPL(Document):
 
     @frappe.whitelist()
     def clear_table(self):
+        self.check_permission("write")
         self.invoices = []
         self.gstr2b_gen_date = ""
         self.filed_taxable_value = 0
@@ -148,6 +150,7 @@ class GSTR2ARIGPL(Document):
 
     @frappe.whitelist()
     def analyse_data(self, dont_save=0):
+        self.check_permission("write")
         self.link_docs()
         if not self.invoices:
             frappe.throw(f"No Data in Invoices for {self.name}")
