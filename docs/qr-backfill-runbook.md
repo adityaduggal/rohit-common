@@ -23,7 +23,7 @@ do not add a second file.
    empty, the patch:
    - reads the PNG from disk and decodes it with zxing-cpp;
    - checks that the decoded text re-renders to a **pixel-identical** PNG, with
-     the same pyqrcode settings as `einv.attach_qrcode()`. This proves that the
+     the same pyqrcode settings as the removed `einv.attach_qrcode()`. This proves that the
      print formats will draw the same QR;
    - writes `signed_qr_code` with `db.set_value` (`modified` does not change).
 4. Before it starts, it prints how many invoices it must backfill. During the

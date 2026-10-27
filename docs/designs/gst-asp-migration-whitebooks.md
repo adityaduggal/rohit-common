@@ -6,6 +6,14 @@ Repo: rohit_common (Rohit Industries Group)
 Status: APPROVED
 Mode: Intrapreneurship
 
+> **Update 2026-10-27 (#17, #19): cut over.** e-Invoice and e-Way Bill now use only
+> WhiteBooks, so every family is on WhiteBooks. The OAuth2 client, the bulk path,
+> the webhook (T9), the E-Invoice Submission Log (T8) and the stuck-submission alert
+> (T12) were not built as designed and are deleted. WhiteBooks' Postman collections
+> show static client headers plus an authenticate call with the GSTIN's API user
+> (see `whitebooks_provider.py`). New IRNs save `signed_qr_code` and make no PNG.
+> The sections below are the original design, kept for history.
+
 ## Problem Statement
 
 `rohit_common`'s GST/ASP integration (`india_gst_api/`) currently depends on
