@@ -70,3 +70,16 @@ class TestRohitSettings(unittest.TestCase):
         )
         with self.assertRaises(frappe.ValidationError):
             self.settings.save(ignore_permissions=True)
+
+    def test_file_deletion_policy_condition_must_parse(self):
+        """The file auto-deletion job put this text straight into SQL and failed with 1064."""
+        from rohit_common.rohit_common.doctype.rohit_settings.rohit_settings import RohitSettings
+
+        bad = frappe._dict(document_type="Sales Invoice",
+            doctype_conditions="docstatus==1 AND outstanding_amount == 0")
+        with self.assertRaises(frappe.ValidationError):
+            RohitSettings.validate_doctype_conditions(bad, "Auto Deletion Policy for Files")
+
+        good = frappe._dict(document_type="Sales Invoice",
+            doctype_conditions="docstatus = 1 AND outstanding_amount = 0")
+        RohitSettings.validate_doctype_conditions(good, "Auto Deletion Policy for Files")

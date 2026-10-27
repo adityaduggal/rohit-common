@@ -27,21 +27,10 @@ class RohitSettings(Document):
         for d in self.auto_deletion_policy_for_files:
             if flt(d.days_to_keep) < min_days_to_keep:
                 frappe.throw(f"Minimum {min_days_to_keep} Days is Needed to Keep Files")
+            self.validate_doctype_conditions(d, "Auto Deletion Policy for Files")
         self.validate_lock_conditions()
 
     def validate_lock_conditions(self):
-        """
-        Rows in locked_doctypes are read as a permission-check condition on every
-        document open and list view (see transaction_lock.py) — unlike
-        auto_deletion_policy_for_files' doctype_conditions (a scheduled job, lower
-        stakes), a malformed or malicious condition here runs on a much hotter,
-        more security-sensitive path, so it is restricted to a single
-        field/operator/value comparison rather than accepted as free-form SQL.
-        """
-        from rohit_common.rohit_common.validations.transaction_lock import (
-            parse_conditions,
-        )
-
         for d in self.locked_doctypes:
             if not d.document_type:
                 frappe.throw("Document Type is mandatory for each row in Locked Doctypes")
@@ -49,12 +38,22 @@ class RohitSettings(Document):
                 frappe.throw(
                     f"Days to Keep must be greater than 0 for {d.document_type} in Locked Doctypes"
                 )
-            if d.doctype_conditions and not parse_conditions(d.doctype_conditions):
-                frappe.throw(
-                    f"Doctype Conditions for {d.document_type} must be one or more "
-                    f"'field operator value' comparisons joined by AND (operators: = != > < is), "
-                    f"e.g. \"outstanding_amount != 0 AND docstatus = 1\". Got: {d.doctype_conditions}"
-                )
+            self.validate_doctype_conditions(d, "Locked Doctypes")
+
+    @staticmethod
+    def validate_doctype_conditions(row, table_label):
+        """
+        Doctype Conditions go into SQL (transaction lock and file auto-deletion), so only
+        'field operator value' comparisons joined by AND are allowed, never free-form SQL.
+        """
+        from rohit_common.rohit_common.validations.transaction_lock import parse_conditions
+
+        if row.doctype_conditions and not parse_conditions(row.doctype_conditions):
+            frappe.throw(
+                f"Doctype Conditions for {row.document_type} in {table_label} must be one or more "
+                f"'field operator value' comparisons joined by AND (operators: = != > < is), "
+                f"e.g. \"outstanding_amount != 0 AND docstatus = 1\". Got: {row.doctype_conditions}"
+            )
 
     def sort_single_field_child(self, table_name, field_name):
         sorted_table = []

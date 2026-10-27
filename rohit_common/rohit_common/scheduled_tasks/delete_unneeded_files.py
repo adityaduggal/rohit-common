@@ -10,6 +10,7 @@ import time
 import frappe
 from ...utils.rohit_common_utils import rebuild_tree, apply_batched_field_update
 from rohit_common.core.file import check_file_availability, delete_file_dt, check_and_move_file, correct_file_name_url
+from ..validations.transaction_lock import conditions_sql, parse_conditions
 
 
 def execute():
@@ -96,9 +97,17 @@ def execute():
     for row in ro_set.auto_deletion_policy_for_files:
         dt_conds = ""
         if row.doctype_conditions:
-            dt_conds = " AND %s" % row.doctype_conditions
-        query = """SELECT fd.name FROM `tabFile` fd, `tab{doctype}` dt WHERE fd.attached_to_doctype = %(doctype)s AND
-        fd.creation <= DATE_SUB(NOW(), INTERVAL %(days)s DAY) AND dt.name = fd.attached_to_name {dt_conds}""".format(
+            parsed = parse_conditions(row.doctype_conditions)
+            if not parsed:
+                # Without its condition the policy would delete more than it should, so skip it
+                frappe.log_error(f"Doctype Conditions for {row.document_type} are not valid: "
+                    f"{row.doctype_conditions}", "Auto Deletion of Files Skipped")
+                continue
+            dt_conds = " AND " + conditions_sql(row.document_type, parsed)
+        # The doctype table has no alias, because conditions_sql names its columns `tab{doctype}`.field
+        query = """SELECT fd.name FROM `tabFile` fd, `tab{doctype}` WHERE fd.attached_to_doctype = %(doctype)s AND
+        fd.creation <= DATE_SUB(NOW(), INTERVAL %(days)s DAY) AND `tab{doctype}`.name = fd.attached_to_name
+        {dt_conds}""".format(
             doctype=row.document_type, dt_conds=dt_conds
         )
         files = frappe.db.sql(query, {"doctype": row.document_type, "days": row.days_to_keep}, as_dict=1)
