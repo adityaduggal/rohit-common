@@ -3,6 +3,8 @@
 import frappe
 from frappe.utils import flt
 
+GST_TAX_TYPES = ("cgst", "sgst", "igst", "cess")
+
 
 def get_inv_status(inv_status):
     if inv_status == "A":
@@ -28,86 +30,137 @@ def get_invoice_uploader(upload_short):
         frappe.throw(f"{upload_short} is Not Valid Type of Invoice Uploader Type")
 
 
+def get_gst_accounts():
+    """
+    GST account heads from GST Settings, one dict per GST Settings row with keys cgst/sgst/igst/cess.
+    One query. Callers that process many documents should call it once and pass the result on.
+    """
+    rows = frappe.get_all("GST Account", filters={"parenttype": "GST Settings", "parentfield": "gst_accounts"},
+                          fields=["cgst_account", "sgst_account", "igst_account", "cess_account"], order_by="idx")
+    return [frappe._dict({tax: row.get(f"{tax}_account") for tax in GST_TAX_TYPES}) for row in rows]
+
+
 def get_hsn_sum_frm_si(si_name):
-    sid = frappe.get_doc("Sales Invoice", si_name)
-    hsn_sum = []
-    for row in sid.items:
-        if not hsn_sum:
-            hsn_dict = make_hsn_sum_dict(sid, row)
-            hsn_sum.append(hsn_dict.copy())
+    return get_hsn_summary_for_invoices([si_name])
+
+
+def get_hsn_summary_for_invoices(si_names):
+    """
+    HSN-wise summary (grouped by HSN and UOM) of the given Sales Invoices, in a constant number of queries.
+    """
+    if not si_names:
+        return []
+    items = frappe.get_all("Sales Invoice Item", filters={"parenttype": "Sales Invoice", "parentfield": "items", "parent": ["in", si_names]},
+                           fields=["parent", "gst_hsn_code", "stock_uom", "qty", "base_net_amount"],
+                           order_by="idx")
+    net_total_by_si = {si.name: si.base_net_total for si in frappe.get_all(
+        "Sales Invoice", filters={"name": ["in", si_names]}, fields=["name", "base_net_total"])}
+    taxes_by_si = get_si_taxes_map(si_names, get_gst_accounts())
+    items_by_si = {}
+    for row in items:
+        items_by_si.setdefault(row.parent, []).append(row)
+    ordered_items = [row for si in si_names for row in items_by_si.get(si, [])]
+    return build_hsn_summary(ordered_items, net_total_by_si, taxes_by_si)
+
+
+def build_hsn_summary(items, net_total_by_si, taxes_by_si):
+    """
+    Groups Sales Invoice Item rows by (HSN, UOM). The invoice tax is allocated to each item row in proportion
+    to its net amount and rounded to 2 decimals per row. Sorted by HSN; rows with the same HSN keep their
+    first-seen order.
+    taxes_by_si: {invoice: (tax_rate, sgst, cgst, igst, cess)} as returned by get_si_taxes_map().
+    """
+    summary = {}
+    for row in items:
+        tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt = taxes_by_si[row.parent]
+        net_total = net_total_by_si[row.parent]
+        if net_total > 0:
+            row_igst = round((igst_amt * row.base_net_amount / net_total), 2)
+            row_sgst = round((sgst_amt * row.base_net_amount / net_total), 2)
+            row_cgst = round((cgst_amt * row.base_net_amount / net_total), 2)
+            row_cess = round((cess_amt * row.base_net_amount / net_total), 2)
         else:
-            found = 0
-            for hsn in hsn_sum:
-                if hsn.hsn == row.gst_hsn_code:
-                    if hsn.uom == row.stock_uom:
-                        found = 1
-                        tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt = get_taxes_from_sid(sid)
-                        if sid.base_net_total > 0:
-                            row_igst = round((igst_amt * row.base_net_amount / sid.base_net_total), 2)
-                            row_sgst = round((sgst_amt * row.base_net_amount / sid.base_net_total), 2)
-                            row_cgst = round((cgst_amt * row.base_net_amount / sid.base_net_total), 2)
-                            row_cess = round((cess_amt * row.base_net_amount / sid.base_net_total), 2)
-                        else:
-                            row_igst, row_sgst, row_cgst, row_cess = 0, 0, 0, 0
-                        row_tot_val = row.base_net_amount + row_igst + row_cgst + row_sgst + row_cess
-                        hsn.total_quantity += row.qty
-                        hsn.total_taxable_value += row.base_net_amount
-                        hsn.igst += row_igst
-                        hsn.cgst += row_cgst
-                        hsn.sgst += row_sgst
-                        hsn.cess += row_cess
-                        hsn.total_value += row_tot_val
-            if found != 1:
-                hsn_dict = make_hsn_sum_dict(sid, row)
-                hsn_sum.append(hsn_dict.copy())
-    return hsn_sum
-
-
-def make_hsn_sum_dict(sid, row):
-    tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt = get_taxes_from_sid(sid)
-    if sid.base_net_total > 0:
-        row_igst = round((igst_amt * row.base_net_amount / sid.base_net_total), 2)
-        row_sgst = round((sgst_amt * row.base_net_amount / sid.base_net_total), 2)
-        row_cgst = round((cgst_amt * row.base_net_amount / sid.base_net_total), 2)
-        row_cess = round((cess_amt * row.base_net_amount / sid.base_net_total), 2)
-    else:
-        row_igst, row_sgst, row_cgst, row_cess = 0, 0, 0, 0
-    row_tot_val = row.base_net_amount + row_igst + row_cgst + row_sgst + row_cess
-    hsn_dict = frappe._dict({})
-    hsn_dict["hsn"] = row.gst_hsn_code
-    hsn_dict["total_quantity"] = row.qty
-    hsn_dict["uom"] = row.stock_uom
-    hsn_dict["total_taxable_value"] = row.base_net_amount
-    hsn_dict["igst"] = row_igst
-    hsn_dict["sgst"] = row_sgst
-    hsn_dict["cgst"] = row_cgst
-    hsn_dict["cess"] = row_cess
-    hsn_dict["total_value"] = row_tot_val
-    return hsn_dict
+            row_igst, row_sgst, row_cgst, row_cess = 0, 0, 0, 0
+        row_tot_val = row.base_net_amount + row_igst + row_cgst + row_sgst + row_cess
+        key = (row.gst_hsn_code, row.stock_uom)
+        hsn = summary.get(key)
+        if not hsn:
+            summary[key] = frappe._dict({
+                "hsn": row.gst_hsn_code, "total_quantity": row.qty, "uom": row.stock_uom,
+                "total_taxable_value": row.base_net_amount, "igst": row_igst, "sgst": row_sgst,
+                "cgst": row_cgst, "cess": row_cess, "total_value": row_tot_val})
+        else:
+            hsn.total_quantity += row.qty
+            hsn.total_taxable_value += row.base_net_amount
+            hsn.igst += row_igst
+            hsn.cgst += row_cgst
+            hsn.sgst += row_sgst
+            hsn.cess += row_cess
+            hsn.total_value += row_tot_val
+    return sorted(summary.values(), key=lambda i: i["hsn"])
 
 
 def get_linked_type_from_jv(jv_name):
-    linked_dt, linked_dn = "", ""
-    jvd = frappe.get_doc("Journal Entry", jv_name)
-    for row in jvd.accounts:
-        if row.party_type:
-            linked_dt = row.party_type
-            linked_dn = row.party
-            break
-    return linked_dt, linked_dn
+    party = get_jv_party_map([jv_name]).get(jv_name)
+    return party or ("", "")
+
+
+def get_jv_party_map(jv_names):
+    """{Journal Entry: (party_type, party)} from the first account row with a party. One query."""
+    if not jv_names:
+        return {}
+    rows = frappe.get_all("Journal Entry Account",
+                          filters={"parenttype": "Journal Entry", "parentfield": "accounts", "parent": ["in", list(jv_names)],
+                                   "party_type": ["is", "set"]},
+                          fields=["parent", "party_type", "party"], order_by="idx")
+    party_map = {}
+    for row in rows:
+        party_map.setdefault(row.parent, (row.party_type, row.party))
+    return party_map
 
 
 def guess_correct_address(linked_dt, linked_dn):
-    all_addresses = frappe.db.sql("""SELECT a1.name, a1.gstin, a1.validated_gstin
-        FROM `tabAddress` a1, `tabDynamic Link` dl
-        WHERE dl.parent= a1.name AND dl.parenttype = 'Address' AND dl.link_doctype = '%s'
-        AND dl.link_name = '%s' GROUP BY a1.gstin ORDER BY a1.gstin""" % (linked_dt, linked_dn), as_dict=1)
+    addresses = get_party_addresses([(linked_dt, linked_dn)]).get((linked_dt, linked_dn), [])
+    return pick_address(addresses, linked_dt, linked_dn)
+
+
+def get_party_addresses(parties):
+    """{(link_doctype, link_name): [Address rows]} for all given parties, in one query."""
+    parties = {p for p in parties if p[0] and p[1]}
+    if not parties:
+        return {}
+    ad = frappe.qb.DocType("Address")
+    dl = frappe.qb.DocType("Dynamic Link")
+    rows = (
+        frappe.qb.from_(ad).join(dl).on(dl.parent == ad.name)
+        .select(ad.name, ad.gstin, ad.validated_gstin, ad.address_title, dl.link_doctype, dl.link_name)
+        .where((dl.parenttype == "Address") & (dl.parentfield == "links") & dl.link_name.isin([p[1] for p in parties]))
+        # Dynamic Link name order: matches the row order the old GROUP BY query picked from
+        .orderby(ad.gstin).orderby(dl.name)
+        .run(as_dict=True)
+    )
+    by_party = {}
+    for row in rows:
+        key = (row.link_doctype, row.link_name)
+        if key in parties:
+            by_party.setdefault(key, []).append(row)
+    return by_party
+
+
+def pick_address(addresses, linked_dt, linked_dn):
+    """
+    Picks the billing address of a party: the only address, or else the first with a validated GSTIN, or else
+    the first. Addresses with the same GSTIN count once.
+    """
+    unique_by_gstin = {}
+    for add in addresses:
+        unique_by_gstin.setdefault(add.gstin, add)
+    all_addresses = list(unique_by_gstin.values())
     if len(all_addresses) == 1:
         return all_addresses[0].name
     elif len(all_addresses) == 0:
         frappe.throw(f"No Address in System for {linked_dt}: {linked_dn}")
     else:
-        # Now we would need to guess if gstin is same on all address then use any
         # If GSTIN is different and Valid then its a problem
         # If only 1 GSTIN is valid then use valid GSTIN address
         for a in all_addresses:
@@ -118,19 +171,29 @@ def guess_correct_address(linked_dt, linked_dn):
 
 
 def get_gst_export_fields(si_doc):
-    shb, shd_date, tax_payment, port_code = "", "", "", ""
-    tax_doc = frappe.get_doc("Sales Taxes and Charges Template", si_doc.taxes_and_charges)
-    if tax_doc.is_export == 1:
-        shb = si_doc.shipping_bill_number
-        shb_date = si_doc.shipping_bill_date
-        tax_payment = tax_doc.export_type
-        port_code = si_doc.port_code
+    if not si_doc.taxes_and_charges:
+        frappe.throw(f"Sales Taxes and Charges Template is not set in {si_doc.doctype} {si_doc.name}")
+    template = frappe.db.get_value("Sales Taxes and Charges Template", si_doc.taxes_and_charges,
+                                   ["is_export", "export_type"], as_dict=True)
+    return export_fields(si_doc, template)
+
+
+def export_fields(si, template):
+    shb, shb_date, tax_payment, port_code = "", "", "", ""
+    if template and template.is_export == 1:
+        shb = si.shipping_bill_number
+        shb_date = si.shipping_bill_date
+        tax_payment = template.export_type
+        port_code = si.port_code
     return shb, shb_date, tax_payment, port_code
 
 
 def get_gst_jv_type(jv_doc):
-    jv_type = ""
-    for acc in jv_doc.accounts:
+    return gst_jv_type(jv_doc.accounts)
+
+
+def gst_jv_type(jv_accounts):
+    for acc in jv_accounts:
         if acc.party_type:
             if acc.credit_in_account_currency > 0:
                 return "credit"
@@ -139,59 +202,55 @@ def get_gst_jv_type(jv_doc):
 
 
 def get_gst_si_type(si_doc):
-    tax_doc = frappe.get_doc("Sales Taxes and Charges Template", si_doc.taxes_and_charges)
-    if si_doc.is_return != 1:
-        if tax_doc.is_export == 1:
+    if not si_doc.taxes_and_charges:
+        frappe.throw(f"Sales Taxes and Charges Template is not set in {si_doc.doctype} {si_doc.name}")
+    is_export = frappe.db.get_value("Sales Taxes and Charges Template", si_doc.taxes_and_charges, "is_export")
+    return gst_si_type(si_doc, is_export)
+
+
+def gst_si_type(si, is_export):
+    if si.is_return != 1:
+        if is_export == 1:
             return "export"
-        elif si_doc.billing_address_gstin == "NA":
-            if si_doc.base_grand_total >= 250000:
+        elif si.billing_address_gstin == "NA":
+            if si.base_grand_total >= 250000:
                 return "b2cl"
             else:
                 return "b2c"
         else:
             return "b2b"
     else:
-        if si_doc.billing_address_gstin == "NA":
+        if si.billing_address_gstin == "NA":
             return "cdn_b2c"
         else:
             return "cdn_b2b"
 
 
 def get_taxes_from_jvd(jvd, jv_type):
+    return taxes_from_jv_accounts(jvd.accounts, jv_type, get_gst_accounts())
+
+
+def taxes_from_jv_accounts(jv_accounts, jv_type, gst_taxes):
     tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt, net_amt = 0, 0, 0, 0, 0, 0
-    gst_set = frappe.get_doc("GST Settings", "GST Setting")
-    gst_taxes = []
     if jv_type == "credit":
         acc_type = "debit"
     elif jv_type == "debit":
         acc_type = "credit"
     else:
         acc_type = ""
-    if gst_set.gst_accounts:
-        for d in gst_set.gst_accounts:
-            gst_dict = frappe._dict({})
-            gst_dict["cgst"] = d.cgst_account
-            gst_dict["sgst"] = d.sgst_account
-            gst_dict["igst"] = d.igst_account
-            gst_dict["cess"] = d.cess_account
-            gst_taxes.append(gst_dict.copy())
-    else:
+    if not gst_taxes:
         frappe.throw("No GST Accounts Setup in GST Settings")
-    for acc in jvd.accounts:
+    for acc in jv_accounts:
+        row_amt = acc.get(acc_type + "_in_account_currency", 0)
         if acc.account not in gst_taxes[0].values():
-            net_amt += acc.get(acc_type + "_in_account_currency", 0)
+            net_amt += row_amt
         for gst in gst_taxes:
-            found = 0
-            row_amt = acc.get(acc_type + "_in_account_currency", 0)
             if acc.account == gst.cgst:
                 cgst_amt += row_amt
-                found = 1
             elif acc.account == gst.sgst:
                 sgst_amt += row_amt
-                found = 1
             elif acc.account == gst.igst:
                 igst_amt += row_amt
-                found = 1
             elif acc.account == gst.cess:
                 cess_amt += row_amt
     tax_rate = round((((sgst_amt + cgst_amt + igst_amt) / net_amt) * 100), 0)
@@ -200,17 +259,23 @@ def get_taxes_from_jvd(jvd, jv_type):
 
 
 def get_taxes_from_sid(sid):
-    tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt = 0, 0 ,0 ,0, 0
-    gst_set = frappe.get_doc("GST Settings", "GST Setting")
-    gst_taxes = []
-    for d in gst_set.gst_accounts:
-        gst_dict = frappe._dict({})
-        gst_dict["cgst"] = d.cgst_account
-        gst_dict["sgst"] = d.sgst_account
-        gst_dict["igst"] = d.igst_account
-        gst_dict["cess"] = d.cess_account
-        gst_taxes.append(gst_dict.copy())
-    for acc in sid.taxes:
+    return taxes_from_si_rows(sid.taxes, get_gst_accounts())
+
+
+def get_si_taxes_map(si_names, gst_taxes):
+    """{Sales Invoice: (tax_rate, sgst, cgst, igst, cess)} for all given invoices, in one query."""
+    rows = frappe.get_all("Sales Taxes and Charges",
+                          filters={"parenttype": "Sales Invoice", "parentfield": "taxes", "parent": ["in", list(si_names)]},
+                          fields=["parent", "account_head", "base_tax_amount", "rate"], order_by="idx")
+    rows_by_si = {si: [] for si in si_names}
+    for row in rows:
+        rows_by_si[row.parent].append(row)
+    return {si: taxes_from_si_rows(tax_rows, gst_taxes) for si, tax_rows in rows_by_si.items()}
+
+
+def taxes_from_si_rows(tax_rows, gst_taxes):
+    tax_rate, sgst_amt, cgst_amt, igst_amt, cess_amt = 0, 0, 0, 0, 0
+    for acc in tax_rows:
         for gst in gst_taxes:
             found = 0
             if acc.account_head == gst.cgst:
@@ -230,20 +295,50 @@ def get_taxes_from_sid(sid):
 
 
 def get_base_doc_frm_docname(dt, dn):
-    try:
-        doc = frappe.get_doc(dt, dn)
-    except:
-        return ""
-    base_doc_no = get_base_doc_no(doc)
-    return base_doc_no
+    return get_base_doc_map(dt, [dn]).get(dn, "")
 
 
 def get_base_doc_no(sid):
     if sid.amended_from:
-        si_base_doc = frappe.get_doc(sid.doctype, sid.amended_from)
-        return get_base_doc_no(si_base_doc)
+        base_doc_no = get_base_doc_map(sid.doctype, [sid.amended_from]).get(sid.amended_from)
+        if not base_doc_no:
+            frappe.throw(f"Amendment chain of {sid.doctype} {sid.name} is broken: {sid.amended_from} or one of "
+                         f"its earlier versions does not exist")
+        return base_doc_no
     else:
         return sid.name
+
+
+def get_base_doc_map(doctype, names):
+    """
+    {name: first document of its amended_from chain} for the given names. One query per amendment depth,
+    not one per document. A name that does not exist, or whose chain points to a missing document, is not
+    in the result.
+    """
+    parent_of = {}
+    pending = {n for n in names if n}
+    while pending:
+        rows = frappe.get_all(doctype, filters={"name": ["in", list(pending)]}, fields=["name", "amended_from"])
+        pending = set()
+        for row in rows:
+            parent_of[row.name] = row.amended_from
+        for row in rows:
+            if row.amended_from and row.amended_from not in parent_of:
+                pending.add(row.amended_from)
+    base_map = {}
+    for name in names:
+        if name not in parent_of:
+            continue
+        current = name
+        seen = {current}
+        while parent_of.get(current):
+            current = parent_of[current]
+            if current in seen:
+                frappe.throw(f"{doctype} {name} has a circular amended_from chain")
+            seen.add(current)
+        if current in parent_of:
+            base_map[name] = current
+    return base_map
 
 
 def set_advances(self):
