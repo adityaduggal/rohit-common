@@ -16,7 +16,6 @@
   "cb01",
   "extend_eway_bill_validity",
   "cb02",
-  "eway_print",
   "sb1",
   "eway_bill_no",
   "eway_bill_date",
@@ -344,12 +343,6 @@
    "fieldtype": "Column Break"
   },
   {
-   "fieldname": "eway_print",
-   "fieldtype": "Button",
-   "label": "Get eWay Bill Print",
-   "options": "get_eway_bill_print"
-  },
-  {
    "fieldname": "from_state_code",
    "fieldtype": "Data",
    "label": "From State Code",
@@ -476,7 +469,7 @@
  ],
  "is_submittable": 1,
  "max_attachments": 1,
- "modified": "2022-03-21 06:52:24.664674",
+ "modified": "2026-10-27 22:15:16.964325",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "eWay Bill",

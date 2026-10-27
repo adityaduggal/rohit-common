@@ -5,7 +5,7 @@
 Renders the e-Invoice QR from the raw IRP SignedQRCode string
 (Sales Invoice.signed_qr_code), for print formats and the PNG backfill.
 
-The parameters must stay the same as einv.attach_qrcode(), which made every
+The parameters must stay the same as the removed einv.attach_qrcode(), which made every
 historical qrcode_image PNG. Then the printed QR is pixel-identical to the
 old PNG, and qr_backfill.matches_original() can prove a decode is correct.
 """

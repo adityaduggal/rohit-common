@@ -2,66 +2,41 @@
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
 """
-WhiteBooks.in GSP provider.
+WhiteBooks.in GSP provider: base URLs, credentials, the response envelope, and
+the authenticated e-Invoice and e-Way Bill clients.
 
-Replaces gsp_session.py's TaxPro/Charteredinfo cert-based session auth
-(deleted 2026-08-22 once the Public GST family was verified end to end) and
-einv.py/eway_bill_api.py's ASP-ID+password headers with an OAuth2
-client_credentials flow per docs/designs/gst-asp-migration-whitebooks.md,
-Premise 2. **Revised 2026-08-22**: WhiteBooks issues a SEPARATE client_id/
-client_secret pair per API product (e-Invoice, Public GST, e-Way Bill), each
-with its own sandbox/production pair — not one shared pair across all three
-as Premise 2 originally assumed. The OAuth2 mechanism (grant_type,
-token-request shape) is still the same across all three families; only the
-credentials — and therefore the cached token — are per-family. The shared
-`Rohit Settings.sandbox_mode` checkbox still selects environment for all
-three, reused rather than duplicated per family.
+WhiteBooks issues a separate client_id/client_secret pair per API product
+(e-Invoice, Public GST, e-Way Bill), each with a sandbox and a production pair.
+Every call sends them as headers. No family uses OAuth2.
 
-CONFIRMED 2026-08-22 (WhiteBooks' "GST-API" Postman collection, provided by
-the user — covers the Public GST + GST-returns-filing product only):
-PUBLIC_GST does **not** use OAuth2 at all. There is no token endpoint for
-this family — every call sends `client_id`/`client_secret` directly as
-request headers (see `get_static_client_headers()` below), plus a
-registered account `email` as a query param (`Rohit Settings.
-whitebooks_gst_email`). The `/oauth/token` 404 the live sandbox returned
-("No API configured for :/oauth/token") is exactly this — PUBLIC_GST was
-wrongly being routed through the OAuth2 flow below. get_headers()/get_token()
-must NOT be used for PUBLIC_GST; call sites use get_static_client_headers()
-instead. Base URL confirmed as apisandbox.whitebooks.in/api.whitebooks.in
-(same host as the other families) but with NO per-family path prefix —
-paths are rooted directly (e.g. `/public/search`, not `/gst/public/search`).
+CONFIRMED from WhiteBooks' Postman collections (E-INVOICE-API, E-waybill and
+GST-API zips):
+- e-Invoice: GET /einvoice/authenticate?email= with the headers username,
+  password, ip_address, client_id, client_secret and gstin returns the
+  AuthToken. Data calls go to /einvoice/type/<TYPE>/version/V1_03?email= with
+  the headers username, auth-token, ip_address, client_id, client_secret and
+  gstin.
+- e-Way Bill: GET /ewaybillapi/v1.03/authenticate?email=&username=&password=
+  opens a session that WhiteBooks keeps. Data calls go to
+  /ewaybillapi/v1.03/ewayapi/<action>?email= with only ip_address, client_id,
+  client_secret and gstin.
+- Public GST / GST returns: rooted paths (/public/search), no family prefix.
+- Every reply is {"status_cd", "status_desc", "error", "data"}.
 
-UNVERIFIED ASSUMPTIONS for EINVOICE and EWAY (see The Assignment in the
-design doc — a sandbox auth handshake must confirm these before this module
-is trusted in production for those two families; the Postman collection
-above only covers PUBLIC_GST, not e-Invoice IRN generation or e-Way Bill):
-1. Token endpoint path and grant_type/client_id/client_secret payload shape
-   below follow the standard OAuth2 client_credentials convention. WhiteBooks'
-   public docs describe OAuth2 bearer-token auth (confirmed via WebSearch,
-   2026-08-22) but the exact token endpoint path was not in the pages
-   fetched during that search. Given PUBLIC_GST turned out to use no OAuth2
-   at all, treat this as genuinely unverified, not just unconfirmed detail —
-   EINVOICE/EWAY may turn out to be static-header auth too.
-2. Base URLs for the e-Invoice and e-Way Bill families are confirmed from
-   WhiteBooks' own developer-portal pages (sandbox: apisandbox.whitebooks.in,
-   production: api.whitebooks.in).
-3. Whether each API family's token endpoint lives under that family's own
-   path (e.g. .../einvoice/oauth/token) or a shared host-level path
-   (.../oauth/token, disambiguated only by which client_id is presented) is
-   unconfirmed. This module assumes the latter (a shared host-level token
-   endpoint) since that's the more common OAuth2 client_credentials pattern
-   — verify and adjust _fetch_new_token() if WhiteBooks' actual docs say
-   otherwise.
+UNVERIFIED until the first sandbox run of whitebooks_sandbox_probe.py (then
+remove this note): the AuthToken/TokenExpiry field names, the e-Invoice
+success status_cd spelling, and the token-expired error codes below.
 """
-from datetime import datetime
+import json
+from urllib.parse import urlparse
 
 import frappe
 import requests
+from frappe.utils import cint, get_datetime, now_datetime
 
 from .common import is_developer_mode
 
-TIMEOUT = 15
-DEFAULT_TOKEN_VALIDITY_SEC = 3600
+TIMEOUT = 30
 
 EINVOICE = "einvoice"
 EWAY = "eway"
@@ -75,8 +50,8 @@ _SANDBOX_HOST = "https://apisandbox.whitebooks.in"
 _PRODUCTION_HOST = "https://api.whitebooks.in"
 _API_PATHS = {
     EINVOICE: "/einvoice",
-    EWAY: "/eway",
-    PUBLIC_GST: "",  # confirmed 2026-08-22 — paths are rooted (/public/search), no /gst prefix
+    EWAY: "/ewaybillapi/v1.03",
+    PUBLIC_GST: "",
 }
 # Per-family Rohit Settings fieldname prefixes (whitebooks_<prefix>_client_id,
 # ..._client_secret, ..._sandbox_client_id, ..._sandbox_client_secret).
@@ -85,6 +60,17 @@ _CREDENTIAL_FIELD_PREFIX = {
     EWAY: "whitebooks_eway",
     PUBLIC_GST: "whitebooks_gst",
 }
+
+EINVOICE_VERSION = "V1_03"
+# WhiteBooks e-Invoice replies spell success "Sucess"; the other families use "1".
+SUCCESS_STATUS = frozenset({"1", "Sucess", "Success"})
+# NIC "invalid or expired token" codes. After one of these, authenticate again and
+# resend once.
+EINVOICE_AUTH_ERROR_CODES = frozenset({"1005"})
+EWAY_AUTH_ERROR_CODES = frozenset({"238"})
+# The e-Way Bill session lasts 6 hours. Re-open it a little earlier.
+EWAY_SESSION_SECS = 350 * 60
+EINVOICE_DEFAULT_TOKEN_SECS = 350 * 60
 
 
 def _get_settings():
@@ -115,19 +101,15 @@ def get_base_url(api_name):
     return host + _API_PATHS[api_name]
 
 
-def _token_cache_key(api_name):
-    return f"whitebooks_gsp_access_token_{api_name}"
-
-
 def _get_client_credentials(rset, api_name):
     prefix = _CREDENTIAL_FIELD_PREFIX[api_name]
     sandbox = _use_sandbox(rset, api_name)
     if sandbox:
         client_id = getattr(rset, f"{prefix}_sandbox_client_id")
-        client_secret = rset.get_password(f"{prefix}_sandbox_client_secret")
+        client_secret = rset.get_password(f"{prefix}_sandbox_client_secret", raise_exception=False)
     else:
         client_id = getattr(rset, f"{prefix}_client_id")
-        client_secret = rset.get_password(f"{prefix}_client_secret")
+        client_secret = rset.get_password(f"{prefix}_client_secret", raise_exception=False)
     if not client_id or not client_secret:
         env = "sandbox" if sandbox else "production"
         frappe.throw(
@@ -137,112 +119,205 @@ def _get_client_credentials(rset, api_name):
     return client_id, client_secret
 
 
-def _fetch_new_token(rset, api_name):
-    client_id, client_secret = _get_client_credentials(rset, api_name)
-    # Token endpoint assumed shared at the host level, not scoped under each
-    # family's own path — see module docstring, assumption 3.
-    host = _SANDBOX_HOST if _use_sandbox(rset, api_name) else _PRODUCTION_HOST
-    url = host + "/oauth/token"
-    body = {
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret,
-    }
-    resp = requests.post(url, data=body, timeout=TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-    access_token = data.get("access_token")
-    if not access_token:
-        frappe.throw(f"WhiteBooks OAuth2 token request returned no access_token: {data}")
-
-    expires_in = int(data.get("expires_in") or DEFAULT_TOKEN_VALIDITY_SEC)
-    token = {
-        "access_token": access_token,
-        "token_type": data.get("token_type", "Bearer"),
-        "fetched_at": datetime.now().isoformat(),
-        "expires_in": expires_in,
-    }
-    # Cache a little short of the real expiry so a request never starts
-    # against a token that's about to lapse mid-flight.
-    cache_ttl = max(expires_in - 30, 30)
-    frappe.cache().set_value(_token_cache_key(api_name), token, expires_in_sec=cache_ttl)
-    return token
-
-
-def get_token(api_name, force_refresh=False):
-    """Returns a cached (or freshly fetched) WhiteBooks OAuth2 access token
-    dict, scoped to the named API family's own client_id/client_secret."""
-    _validate_api_name(api_name)
-    if not force_refresh:
-        cached = frappe.cache().get_value(_token_cache_key(api_name))
-        if cached:
-            return cached
-    return _fetch_new_token(_get_settings(), api_name)
-
-
-def get_headers(api_name):
-    """Auth headers for a call to the named WhiteBooks API family, using
-    that family's own token (per-family credentials, per Premise 2's
-    2026-08-22 revision)."""
-    token = get_token(api_name)
-    return {
-        "Authorization": f"{token['token_type']} {token['access_token']}",
-        "Content-Type": "application/json",
-    }
-
-
 def get_static_client_headers(api_name):
-    """Auth headers for API families that send client_id/client_secret
-    directly on every call instead of exchanging them for an OAuth2 bearer
-    token — confirmed 2026-08-22 for PUBLIC_GST via WhiteBooks' GST-API
-    Postman collection (no /oauth/token endpoint exists for this family).
-    Do not use get_headers()/get_token() for PUBLIC_GST."""
+    """client_id/client_secret headers that every WhiteBooks call sends."""
     rset = _get_settings()
     client_id, client_secret = _get_client_credentials(rset, api_name)
     return {"client_id": client_id, "client_secret": client_secret}
 
 
-def get_registered_email(api_name):
-    """The WhiteBooks account email registered against a family's
-    client_id/client_secret — required as a query param on every PUBLIC_GST
-    call (Rohit Settings.whitebooks_gst_email)."""
-    prefix = _CREDENTIAL_FIELD_PREFIX[api_name]
-    rset = _get_settings()
-    email = getattr(rset, f"{prefix}_email", None)
+def get_registered_email(api_name=None):
+    """The WhiteBooks account email. Every call sends it as the `email` query
+    param. One account owns the client pairs of all families."""
+    email = _get_settings().whitebooks_gst_email
     if not email:
-        frappe.throw(
-            f"WhiteBooks registered email for {api_name!r} is not configured "
-            "on Rohit Settings — set it under the WhiteBooks GSP section."
-        )
+        frappe.throw("Set WhiteBooks Registered Email in Rohit Settings (WhiteBooks section)",
+                     title="WhiteBooks Email Missing")
     return email
 
 
-def refresh_session(api_name=None):
-    """Drop the cached token for the named family — call after a 401/
-    expired-token response, then retry the request once. api_name is
-    required for the per-family cache; kept as a defaulted kwarg only for a
-    zero-arg call shape — call sites in this module always pass api_name
-    explicitly."""
-    if api_name is None:
-        frappe.throw("whitebooks_provider.refresh_session() requires api_name")
-    _validate_api_name(api_name)
-    frappe.cache().delete_value(_token_cache_key(api_name))
+# ---------------------------------------------------------------------------
+# Response envelope, shared by every family
+# ---------------------------------------------------------------------------
 
 
-def call_with_token_retry(request_fn, api_name):
-    """Call request_fn() (a zero-arg callable making the actual HTTP call
-    with fresh get_headers(api_name)) and retry it exactly once if the
-    response indicates an expired/invalid token.
+def is_success(resp):
+    return str(resp.get("status_cd")) in SUCCESS_STATUS
 
-    request_fn must return a requests.Response. This is the single retry
-    pattern from the Error Handling section of the design doc — one retry
-    after invalidating, not an open-ended loop. Non-auth failures (5xx,
-    timeouts, malformed bodies) are NOT retried here; they fail loud so the
-    caller's own tagged logging (whitebooks-defect vs whitebooks-outage)
-    can record them.
-    """
-    response = request_fn()
-    if response.status_code == 401:
-        refresh_session(api_name)
-        response = request_fn()
-    return response
+
+def error_codes(resp):
+    """Every error code in a reply, as strings. GSTN uses error_cd, WhiteBooks
+    uses errorCode, and e-Invoice puts an IRP list of {ErrorCode, ErrorMessage}
+    as JSON text in status_desc. e-Way Bill puts {"errorCodes": "238,"} in
+    error.message."""
+    codes = []
+    error = resp.get("error")
+    if isinstance(error, dict):
+        codes += [error.get(key) for key in ("errorCode", "error_cd", "code")]
+        codes += _codes_from_text(error.get("message"))
+    else:
+        codes += [resp.get("errorCode"), resp.get("error_cd")]
+        codes += _codes_from_text(error)
+    codes += _codes_from_text(resp.get("status_desc"))
+    return [str(code).strip() for code in codes if code not in (None, "")]
+
+
+def _codes_from_text(text):
+    if not isinstance(text, str) or text[:1] not in "[{":
+        return []
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return []
+    if isinstance(parsed, dict):
+        return [code for code in str(parsed.get("errorCodes") or "").split(",") if code.strip()]
+    if isinstance(parsed, list):
+        return [row.get("ErrorCode") for row in parsed if isinstance(row, dict)]
+    return []
+
+
+def describe(resp):
+    error = resp.get("error")
+    message = (error.get("errorMessage") or error.get("message") or error.get("desc")
+               if isinstance(error, dict) else error)
+    return f"{resp.get('status_desc') or message or ''} (raw response: {resp})"
+
+
+def unwrap(resp, context):
+    """The `data` of a successful reply, parsed if WhiteBooks sends it as JSON text.
+    Throws with the codes and the raw reply otherwise."""
+    if not is_success(resp):
+        frappe.throw(f"{context} failed: {describe(resp)}", title="WhiteBooks API Error")
+    data = resp.get("data")
+    if isinstance(data, str) and data[:1] in "[{":
+        data = json.loads(data)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# e-Invoice and e-Way Bill clients
+# ---------------------------------------------------------------------------
+
+
+def get_document_session(api_name):
+    """GSTIN, API user, client pair, email and IP for an e-Invoice or e-Way Bill
+    call. The sandbox has its own GSTIN and API user."""
+    rset = _get_settings()
+    sandbox = _use_sandbox(rset, api_name)
+    if sandbox:
+        gstin = rset.whitebooks_sandbox_gstin
+        username = rset.whitebooks_sandbox_api_username
+        password = rset.get_password("whitebooks_sandbox_api_password", raise_exception=False)
+    else:
+        gstin = rset.gstin
+        username = rset.eway_bill_id
+        password = rset.get_password("eway_bill_password", raise_exception=False)
+    env = "Sandbox" if sandbox else "Production"
+    if not (gstin and username and password):
+        frappe.throw(f"Set the {env} GSTIN, GST API Username and GST API Password in Rohit Settings "
+                     "(WhiteBooks section)", title="WhiteBooks GST API User Missing")
+    if not rset.whitebooks_gst_ip_address:
+        frappe.throw("Set WhiteBooks Server IP Address in Rohit Settings (WhiteBooks section)",
+                     title="WhiteBooks IP Address Missing")
+    client_id, client_secret = _get_client_credentials(rset, api_name)
+    return frappe._dict(
+        api_name=api_name, env=env, gstin=gstin, username=username, password=password,
+        email=get_registered_email(api_name), base_url=get_base_url(api_name),
+        headers={"client_id": client_id, "client_secret": client_secret,
+                 "ip_address": rset.whitebooks_gst_ip_address, "gstin": gstin},
+    )
+
+
+def einvoice_request(method, type_, params=None, body=None, extra_headers=None):
+    """One e-Invoice API call. Returns the reply envelope, so the caller can see
+    error codes such as a duplicate IRN. Re-authenticates once on an expired token."""
+    session = get_document_session(EINVOICE)
+    url = f"{session.base_url}/type/{type_}/version/{EINVOICE_VERSION}"
+
+    def send():
+        headers = dict(session.headers, username=session.username)
+        headers["auth-token"] = _einvoice_auth_token(session)
+        headers.update(extra_headers or {})
+        return _send(method, url, headers, dict(params or {}, email=session.email), body)
+
+    resp = send()
+    if set(error_codes(resp)) & EINVOICE_AUTH_ERROR_CODES:
+        frappe.cache().delete_value(_cache_key(session, "einv_token"))
+        resp = send()
+    return resp
+
+
+def eway_request(method, action, params=None, body=None):
+    """One e-Way Bill API call. Returns the reply envelope. Opens the WhiteBooks
+    session first, and once more if WhiteBooks says it expired."""
+    session = get_document_session(EWAY)
+    url = f"{session.base_url}/ewayapi/{action}"
+
+    def send():
+        _open_eway_session(session)
+        return _send(method, url, session.headers, dict(params or {}, email=session.email), body)
+
+    resp = send()
+    if set(error_codes(resp)) & EWAY_AUTH_ERROR_CODES:
+        frappe.cache().delete_value(_cache_key(session, "eway_session"))
+        resp = send()
+    return resp
+
+
+def _cache_key(session, kind):
+    return f"whitebooks_{kind}:{session.env}:{session.gstin}"
+
+
+def _einvoice_auth_token(session):
+    key = _cache_key(session, "einv_token")
+    token = frappe.cache().get_value(key)
+    if token:
+        return token
+    headers = dict(session.headers, username=session.username, password=session.password)
+    resp = _send("GET", f"{session.base_url}/authenticate", headers, {"email": session.email})
+    data = unwrap(resp, f"WhiteBooks e-Invoice authentication for GSTIN {session.gstin}") or {}
+    token = data.get("AuthToken")
+    if not token:
+        frappe.throw(f"WhiteBooks e-Invoice authentication returned no AuthToken: {describe(resp)}",
+                     title="WhiteBooks API Error")
+    frappe.cache().set_value(key, token, expires_in_sec=_token_secs(data.get("TokenExpiry")))
+    return token
+
+
+def _token_secs(token_expiry):
+    """Seconds to cache the token: until 2 minutes before TokenExpiry."""
+    if not token_expiry:
+        return EINVOICE_DEFAULT_TOKEN_SECS
+    secs = int((get_datetime(token_expiry) - now_datetime()).total_seconds()) - 120
+    return max(secs, 60)
+
+
+def _open_eway_session(session):
+    key = _cache_key(session, "eway_session")
+    if cint(frappe.cache().get_value(key)):
+        return
+    params = {"email": session.email, "username": session.username, "password": session.password}
+    resp = _send("GET", f"{session.base_url}/authenticate", session.headers, params)
+    unwrap(resp, f"WhiteBooks e-Way Bill authentication for GSTIN {session.gstin}")
+    frappe.cache().set_value(key, 1, expires_in_sec=EWAY_SESSION_SECS)
+
+
+def _send(method, url, headers, params, body=None):
+    """Sends a request and returns the JSON reply. A network error is raised
+    without the URL: the e-Way Bill authenticate URL holds the API password (#23)."""
+    kwargs = {"data": body} if isinstance(body, str) else {"json": body}
+    error = None
+    try:
+        response = requests.request(method, url, headers=dict(headers, **{"Content-Type": "application/json"}),
+                                    params=params, timeout=TIMEOUT, **kwargs)
+        reply = response.json()
+    except requests.RequestException as e:
+        error = type(e).__name__
+    except ValueError:
+        error = f"HTTP {response.status_code}, reply is not JSON"
+    # Throw outside the except block, so the traceback does not chain the
+    # original exception and its URL.
+    if error:
+        frappe.throw(f"WhiteBooks request to {urlparse(url).path} failed: {error}",
+                     title="WhiteBooks Request Failed")
+    return reply

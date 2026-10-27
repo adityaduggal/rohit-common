@@ -1,318 +1,136 @@
 #  Copyright (c) 2022. Rohit Industries Group Private Limited and Contributors.
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
-import io
-import re
+"""
+e-Invoice (IRN) generation on WhiteBooks.in, and the IRP payload builders.
+Charteredinfo/TaxPro was removed 2026-10-27 (issues #17, #19). The request,
+auth and reply envelope live in whitebooks_provider.einvoice_request().
+
+UNVERIFIED until the first sandbox run of whitebooks_sandbox_probe.py: the
+duplicate-IRN code (NIC uses 2150) and that GETIRNBYDOCDETAILS takes the doc
+type as param1 and docnum/docdate as headers, as the Postman collection shows.
+"""
 import json
 import frappe
-import requests
-from datetime import datetime
-from pyqrcode import create as qrcreate
-from frappe.utils import get_datetime, flt
+from frappe.utils import cint, flt, getdate
+from rq.timeouts import JobTimeoutException
 from . import whitebooks_provider
-from .eway_bill_api import get_eway_pass, get_taxes_type, get_transport_mode, get_eway_distance
-from .common import get_base_url, get_aspid_pass, get_default_gstin, get_numeric_state_code, \
-    get_gst_pincode, get_gst_based_uom, get_place_of_supply
-TIMEOUT = 10
-WHITEBOOKS_DUPLICATE_IRN_ERROR_CODE = "2150"  # UNVERIFIED — see generate_irn_whitebooks()
-
-
-def generate_eway_irn(dtype, dname):
-    """
-    Generates eWay Bill for Sales Invoice from IRN
-    """
-    api = "gen_eway_irn"
-    full_url = get_full_einv_url(api)
-    if dtype != "Sales Invoice":
-        frappe.throw(f"EWay Bill is Only Possible for Sales Invoices")
-    else:
-        dtd = frappe.get_doc(dtype, dname)
-    if not dtd.irn:
-        frappe.throw(f"No IRN mentioned in {frappe.get_desk_link({dtype}, {dname})}")
-    headers = get_headers()
-    eway_json = json.dumps(get_eway_details(dtype, dname))
-    res = requests.post(url=full_url, headers=headers, data=eway_json, timeout=TIMEOUT).json()
-    # print(eway_json)
-    # print(full_url)
-    print(res)
-
-
-def get_irn_details(irn_no):
-    """
-    Gets IRN details for a given IRN number
-    """
-    api = "get_irn"
-    irn_dict = ""
-    full_url = get_full_einv_url(api)
-    full_url = add_qr_code_size(url=full_url)
-    new_url = full_url.split("?")
-    full_url = f"{new_url[0]}/{irn_no}?{new_url[1]}"
-    res = requests.get(url=full_url, timeout=TIMEOUT).json()
-    if flt(res.get("Status")) == 1:
-        irn_dict = json.loads(res.get("Data"))
-    else:
-        print(res)
-    return irn_dict
+from .eway_bill_api import get_taxes_type, get_transport_mode, get_eway_distance
+from .common import get_default_gstin, get_numeric_state_code, get_gst_pincode, \
+    get_gst_based_uom, get_place_of_supply, use_gst_sandbox
+DUPLICATE_IRN_ERROR_CODE = "2150"
+EWB_FAILURE_TITLE = "e-Way Bill from IRN Failed for "
 
 
 def generate_irn(dtype, dname):
     """
-    Generates the IRN for a Document No and a Document Type
-    IRN can be generated for the following documents only B2B
+    Generates the IRN for a Document No and a Document Type, and saves it with the
+    signed QR code. IRN can be generated for the following documents only B2B
     1. Sales Invoice normal and credit notes based on items
     2. Journal Entry if Credit or Debit Notes for Registered Customers or Suppliers
+    A duplicate IRN means the IRP already has one for this document, so it is
+    fetched and saved instead. Any other rejection throws, so the 15-min sweep
+    logs it and backs off this invoice (#16).
     """
-    api = "generate_irn"
-    full_url = get_full_einv_url(api)
-    full_url = add_qr_code_size(url=full_url)
-    headers = get_headers()
-    einv_json = gen_einv_json(dtype=dtype, dname=dname)
-    # print(einv_json)
-    res = json.loads(requests.post(url=full_url, headers=headers, data=einv_json,
-        timeout=TIMEOUT).text)
-    # print(res)
-    if flt(res.get("Status")) == 1:
-        irn_dict = json.loads(res.get("Data"))
-        update_irn_details(dtype, dname, irn_dict)
+    resp = whitebooks_provider.einvoice_request("POST", "GENERATE", body=gen_einv_json(dtype, dname))
+    if whitebooks_provider.is_success(resp):
+        irn_dict = whitebooks_provider.unwrap(resp, f"IRN generation for {dname}")
+    elif DUPLICATE_IRN_ERROR_CODE in whitebooks_provider.error_codes(resp):
+        irn_dict = get_irn_by_doc(dtype, dname)
     else:
-        error = res.get("ErrorDetails")[0]
-        if error.get("ErrorCode") == "2150":
-            # Duplicate IRN so update IRN details in Invoice
-            info_det = res.get("InfoDtls")[0]
-            irn_dict = info_det.get("Desc")
-            update_irn_details(dtype, dname, irn_dict)
-            print("Updated IRN details")
-        else:
-            # Raise so the sweep logs it and backs off this invoice (#16)
-            errors = "; ".join(f"{err.get('ErrorCode')}: {err.get('ErrorMessage')}"
-                               for err in res.get("ErrorDetails") or [])
-            frappe.throw(f"IRN not generated for {dname}. {errors}", title="eInvoice Rejected")
+        frappe.throw(f"IRN not generated for {dname}. {whitebooks_provider.describe(resp)}",
+                     title="eInvoice Rejected")
+    update_irn_details(dtype, dname, irn_dict)
+    if auto_ewb_needed(dtype, dname):
+        try:
+            generate_ewb_by_irn(dname)
+        except JobTimeoutException:
+            raise
+        except Exception:
+            # The IRN is saved. The e-Way Bill can still be made by hand or pulled.
+            frappe.db.rollback()
+            frappe.log_error(frappe.get_traceback(), EWB_FAILURE_TITLE + dname)
+            frappe.db.commit()
 
 
-def attach_qrcode(dtype, dname, qrcode):
+def get_irn_details(irn_no):
     """
-    Creates and Attaches the QR code from a QR Code Value
+    Gets IRN details (Irn, AckNo, AckDt, SignedQRCode, ...) for a given IRN number
     """
-    new_dname = re.sub('[^A-Za-z0-9]+', '', dname)
-    filename = f"QRCode_{new_dname}.png"
+    resp = whitebooks_provider.einvoice_request("GET", "GETIRN", params={"param1": irn_no})
+    return whitebooks_provider.unwrap(resp, f"IRN lookup for {irn_no}") or {}
 
-    qr_image = io.BytesIO()
-    url = qrcreate(qrcode, error='L')
-    url.png(qr_image, scale=2, quiet_zone=1)
-    file = frappe.get_doc({
-            "doctype": "File",
-            "file_name": filename,
-            "attached_to_doctype": dtype,
-            "attached_to_name": dname,
-            "attached_to_field": "qrcode_image",
-            "is_private": 1,
-            "content": qr_image.getvalue()})
-    file.save()
-    frappe.db.set_value(dtype, dname, "qrcode_image", file.file_url)
-    frappe.db.commit()
+
+def get_irn_by_doc(dtype, dname):
+    """
+    Gets the IRN details of a document by its type, number and date. Used after a
+    duplicate IRN reply, which does not carry the signed QR code.
+    """
+    doc = frappe.get_doc(dtype, dname)
+    resp = whitebooks_provider.einvoice_request(
+        "GET", "GETIRNBYDOCDETAILS", params={"param1": get_einv_doctype(doc)},
+        extra_headers={"docnum": dname, "docdate": getdate(doc.posting_date).strftime("%d/%m/%Y")})
+    return whitebooks_provider.unwrap(resp, f"IRN lookup for {dname}") or {}
 
 
 def update_irn_details(dtype, dname, irn_dict):
     """
-    Updates the IRN No, Ack No, Ack Date in a Doctype
+    Saves the IRN No, Ack No, Ack Date and the signed QR code in a Doctype. The
+    print formats draw the QR from signed_qr_code, so no PNG is made (#17).
     """
-    frappe.db.set_value(dtype, dname, "irn", irn_dict.get("Irn"))
-    frappe.db.set_value(dtype, dname, "ack_no", irn_dict.get("AckNo"))
-    frappe.db.set_value(dtype, dname, "ack_date", irn_dict.get("AckDt"))
-    if not irn_dict.get("SignedQRCode"):
-        new_irn_dict = get_irn_details(irn_dict.get("Irn"))
-        qr_code = new_irn_dict.get("SignedQRCode")
-    else:
-        qr_code = irn_dict.get("SignedQRCode")
-    attach_qrcode(dtype, dname, qr_code)
-
-
-def get_headers():
-    """
-    Returns headers for Application
-    """
-    return {
-        "content-type": "application/json"
+    qr_code = irn_dict.get("SignedQRCode")
+    if not qr_code:
+        qr_code = get_irn_details(irn_dict.get("Irn")).get("SignedQRCode")
+    if not qr_code:
+        # Nothing is saved, so the next sweep run gets a duplicate IRN reply and
+        # fetches the IRN and QR code again.
+        frappe.throw(f"IRP returned no Signed QR Code for {dname} (IRN {irn_dict.get('Irn')})",
+                     title="eInvoice QR Code Missing")
+    values = {
+        "irn": irn_dict.get("Irn"),
+        "ack_no": irn_dict.get("AckNo"),
+        "ack_date": irn_dict.get("AckDt"),
+        "signed_qr_code": qr_code,
     }
+    if irn_dict.get("EwbNo"):
+        values["ewaybill"] = str(irn_dict.get("EwbNo"))
+    frappe.db.set_value(dtype, dname, values)
+    # The IRP has issued the IRN and cannot take it back, so keep it even if the
+    # caller rolls back later.
+    frappe.db.commit()
 
 
-# ---------------------------------------------------------------------------
-# WhiteBooks.in equivalents (T3, docs/designs/gst-asp-migration-whitebooks.md)
-#
-# NOT YET WIRED INTO THE LIVE CALL PATH. generate_irn()/attach_qrcode()/
-# update_irn_details() above remain the production e-invoice path until The
-# Assignment's sandbox handshake (and a real generate-IRN sandbox call)
-# confirm the response shapes assumed below — per Premise 4, cutover means
-# swapping the live call sites AND deleting the Charteredinfo-specific code
-# in the same change, once validated, not before. Reuses gen_einv_json(),
-# get_eway_details(), and update_irn_details() unchanged (Premise 3) — only
-# the HTTP/auth/response-envelope layer below is new.
-#
-# UNVERIFIED RESPONSE SHAPE: WhiteBooks' OpenAPI-documented REST API almost
-# certainly does NOT use Charteredinfo's ad hoc {"Status": "1", "Data": ...,
-# "ErrorDetails": [...]} envelope — this code assumes a conventional REST
-# shape instead (HTTP status code signals success/failure; the IRP-schema
-# fields — Irn/AckNo/AckDt/SignedQRCode, same names update_irn_details()
-# already expects — sit either at the JSON body's top level or under a
-# "data" key). Confirm against a real WhiteBooks sandbox response before
-# trusting this in production; update _parse_generate_irn_response() and
-# WHITEBOOKS_DUPLICATE_IRN_ERROR_CODE to match once confirmed.
-# ---------------------------------------------------------------------------
-
-
-def generate_irn_whitebooks(dtype, dname):
+def auto_ewb_needed(dtype, dname):
     """
-    WhiteBooks.in equivalent of generate_irn(). See module note above —
-    the response envelope this parses is an unverified assumption.
+    True if Rohit Settings asks for an e-Way Bill with each IRN, and the invoice is
+    over the e-Way Bill limit and has none yet.
     """
-    einv_json = gen_einv_json(dtype=dtype, dname=dname)
-
-    def _call():
-        return requests.post(
-            url=whitebooks_provider.get_base_url(whitebooks_provider.EINVOICE) + "/generate",
-            headers=whitebooks_provider.get_headers(whitebooks_provider.EINVOICE),
-            data=einv_json,
-            timeout=TIMEOUT,
-        )
-
-    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EINVOICE)
-    _handle_generate_irn_response(dtype, dname, response)
+    if dtype != "Sales Invoice":
+        return False
+    auto_ewb, eway_limit = frappe.db.get_value(
+        "Rohit Settings", "Rohit Settings", ["auto_generate_ewb_from_irn", "eway_bill_limit"])
+    if not cint(auto_ewb):
+        return False
+    total, ewaybill = frappe.db.get_value(dtype, dname, ["base_grand_total", "ewaybill"])
+    return not ewaybill and flt(total) >= flt(eway_limit)
 
 
-def _handle_generate_irn_response(dtype, dname, response):
+def generate_ewb_by_irn(dname):
     """
-    Parses a generate-IRN response and updates the document, or handles the
-    duplicate-IRN case the same way generate_irn() already does for
-    Charteredinfo (fetch and record the existing IRN instead of treating it
-    as a failure — see the Error Handling / submission-idempotency section
-    of the design doc). Split out from generate_irn_whitebooks() so this is
-    the one function that needs rewriting once the real response shape is
-    confirmed, without touching the request-sending code above it.
+    Generates the e-Way Bill of a Sales Invoice from its IRN and saves the number
+    in Sales Invoice.ewaybill
     """
-    if response.status_code == 200:
-        irn_dict = _parse_generate_irn_response(response.json())
-        update_irn_details(dtype, dname, irn_dict)
-        return
-
-    error_code = _extract_whitebooks_error_code(response)
-    if error_code == WHITEBOOKS_DUPLICATE_IRN_ERROR_CODE:
-        irn_dict = get_irn_details_whitebooks_by_doc(dtype, dname)
-        update_irn_details(dtype, dname, irn_dict)
-        return
-
-    frappe.log_error(
-        title="WhiteBooks e-Invoice generation failed",
-        message=f"{dtype} {dname}: HTTP {response.status_code} — {response.text}",
-    )
-    frappe.throw(
-        f"WhiteBooks e-Invoice generation failed for {frappe.get_desk_link(dtype, dname)}: "
-        f"HTTP {response.status_code}"
-    )
-
-
-def _parse_generate_irn_response(res):
-    """Returns the Irn/AckNo/AckDt/SignedQRCode dict from a successful
-    generate-IRN response body. UNVERIFIED shape — see module note."""
-    return res.get("data") or res
-
-
-def _extract_whitebooks_error_code(response):
-    """UNVERIFIED — WhiteBooks' error response shape has not been confirmed.
-    Returns None if the shape doesn't match what's assumed here, which
-    falls through to the generic failure path in
-    _handle_generate_irn_response() rather than silently misinterpreting
-    an unrelated error as a duplicate-IRN case."""
-    try:
-        body = response.json()
-    except ValueError:
-        return None
-    return body.get("error_code") or body.get("errorCode")
-
-
-def generate_irn_whitebooks_bulk(dtype, dnames):
-    """
-    T11, docs/designs/gst-asp-migration-whitebooks.md — the backlog/recovery
-    path's true multi-invoice bulk submission (up to 1,000 per call per
-    WhiteBooks' docs). NOT YET WIRED into the live scheduled sweep — see
-    scheduled_tasks/auto_einvoice_tasks.py's
-    make_einvoice_for_docs_whitebooks_bulk(), which calls this but isn't
-    itself in scheduler_events yet.
-
-    UNVERIFIED request/response shape (see module note above
-    generate_irn_whitebooks()): assumes a wrapper object
-    `{"invoices": [...]}` for the request, and
-    `{"rejected": [{"referenceId": ..., "error": ...}, ...]}` for
-    synchronously-rejected invoices in the response — accepted invoices are
-    NOT expected to appear in the response at all; their result arrives
-    later via the webhook (T9), which is why this bulk call needs
-    longer-than-single-call TIMEOUT but returns quickly with just the
-    accept/reject split, not IRNs.
-
-    Deliberately generates the correlation ID client-side
-    (`frappe.generate_hash`) per invoice and embeds it in each invoice's
-    payload as `_referenceId`, rather than trusting WhiteBooks to invent
-    and return a stable ID — a client-generated ID is the more defensive
-    design regardless of which way WhiteBooks' real API actually works, and
-    doubles as the E-Invoice Submission Log's unique `submission_id`.
-
-    Returns (submission_ids, immediate_rejections):
-      submission_ids: {dname: submission_id}, one per invoice, for every
-        invoice in dnames regardless of accept/reject.
-      immediate_rejections: {dname: error_message}, only for invoices the
-        bulk ACK response rejected synchronously — the "partial batch
-        failure" case. Invoices not in this dict were accepted for async
-        processing (their result comes via the webhook).
-    """
-    submission_ids = {dname: frappe.generate_hash(length=20) for dname in dnames}
-    invoices_payload = []
-    for dname in dnames:
-        payload = json.loads(gen_einv_json(dtype, dname))
-        payload["_referenceId"] = submission_ids[dname]  # UNVERIFIED wrapper field
-        invoices_payload.append(payload)
-
-    def _call():
-        return requests.post(
-            url=whitebooks_provider.get_base_url(whitebooks_provider.EINVOICE) + "/bulk-generate",
-            headers=whitebooks_provider.get_headers(whitebooks_provider.EINVOICE),
-            json={"invoices": invoices_payload},
-            timeout=TIMEOUT * 10,
-        )
-
-    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EINVOICE)
-    response.raise_for_status()
-    body = response.json()
-
-    ref_id_to_dname = {sid: dname for dname, sid in submission_ids.items()}
-    immediate_rejections = {}
-    for rejection in body.get("rejected", []):
-        dname = ref_id_to_dname.get(rejection.get("referenceId"))
-        if dname:
-            immediate_rejections[dname] = rejection.get("error") or "rejected by WhiteBooks bulk endpoint"
-
-    return submission_ids, immediate_rejections
-
-
-def get_irn_details_whitebooks_by_doc(dtype, dname):
-    """
-    WhiteBooks.in equivalent of get_irn_details() — looks up an existing
-    IRN by document number rather than by IRN, for the duplicate-IRN retry
-    path. UNVERIFIED endpoint path and response shape — WhiteBooks' docs
-    mention a "Lookup IRN by document number" endpoint (confirmed via
-    WebSearch, 2026-08-22) but the exact path/params were not in the pages
-    fetched during that search.
-    """
-    def _call():
-        return requests.get(
-            url=whitebooks_provider.get_base_url(whitebooks_provider.EINVOICE) + "/lookup",
-            headers=whitebooks_provider.get_headers(whitebooks_provider.EINVOICE),
-            params={"docNo": dname},
-            timeout=TIMEOUT,
-        )
-
-    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EINVOICE)
-    response.raise_for_status()
-    return _parse_generate_irn_response(response.json())
-
+    irn = frappe.db.get_value("Sales Invoice", dname, "irn")
+    if not irn:
+        frappe.throw(f"No IRN mentioned in {frappe.get_desk_link('Sales Invoice', dname)}")
+    body = dict(get_eway_details("Sales Invoice", dname), Irn=irn)
+    resp = whitebooks_provider.einvoice_request("POST", "GENERATE_EWAYBILL", body=body)
+    ewb = whitebooks_provider.unwrap(resp, f"e-Way Bill from IRN for {dname}") or {}
+    if not ewb.get("EwbNo"):
+        frappe.throw(f"IRP returned no e-Way Bill number for {dname}: {whitebooks_provider.describe(resp)}")
+    frappe.db.set_value("Sales Invoice", dname, "ewaybill", str(ewb.get("EwbNo")))
+    frappe.db.commit()
+    return ewb
 
 
 def gen_einv_json(dtype, dname):
@@ -333,33 +151,21 @@ def gen_einv_json(dtype, dname):
     buy_add = dtd.customer_address
     ship_add = dtd.shipping_address_name
     einv_dt = add_einv_adr_details(einv_dt, sell_add, type_of_detail="seller")
+    if use_gst_sandbox():
+        # The sandbox only accepts its own seller GSTIN
+        einv_dt.SellerDtls.Gstin = get_default_gstin(sbox=1)
+        einv_dt.SellerDtls.Stcd = einv_dt.SellerDtls.Gstin[:2]
     einv_dt = add_einv_adr_details(einv_dt, buy_add, type_of_detail="buyer", pos=pos)
     einv_dt = add_einv_adr_details(einv_dt, ship_add, type_of_detail="ship",
         port_code=dtd.port_code)
     einv_it_val = get_einv_item_details(dtype, dname)
     einv_dt.ItemList = einv_it_val[0]
     einv_dt.ValDtls = einv_it_val[1]
-    # einv_dt = add_eway_dict(dtype, dname, einv_dt)
     # einv_final.Data = einv_dt
     einv_json = json.dumps(einv_dt)
     # Dispatch details are only needed when there is difference in Biller and dispatcher
     # einv_dt = add_einv_adr_details(einv_dt, sell_add, type_of_detail="dispatch")
     return einv_json
-
-
-def add_eway_dict(dtype, dname, exist_dict):
-    """
-    Adds eway details to e-Invoice dictionary if needed else throws error.
-    1. Checks if the eWay Bills is needed by checking the eway bill Limit.
-    2. If eway Bill needed then adds the dictionary EwbDtls to the existing dict
-    """
-    if dtype == "Sales Invoice":
-        eway_limit = flt(frappe.get_value("Rohit Settings", "Rohit Settings", "eway_bill_limit"))
-        doc_total = frappe.get_value(dtype, dname, "base_grand_total")
-        if doc_total >= eway_limit:
-            # Add eWay bill details
-            exist_dict.EwbDtls = get_eway_details(dtype, dname)
-    return exist_dict
 
 
 def get_eway_details(dtype, dname):
@@ -369,16 +175,18 @@ def get_eway_details(dtype, dname):
     """
     eway_dt = frappe._dict({})
     sid = frappe.get_doc(dtype, dname)
-    eway_dt.Distance = get_eway_distance(frm_adr_name=sid.company_address,
+    eway_dt.Distance = cint(sid.distance) or get_eway_distance(frm_adr_name=sid.company_address,
         to_adr_name=sid.shipping_address_name)
     eway_dt.TransMode = str(get_transport_mode(sid.mode_of_transport))
     tpt_gstin = get_transporter_gstin(sid.transporters)
     if tpt_gstin:
         eway_dt.TransId = tpt_gstin
         eway_dt.TransDocNo = sid.lr_no
+        if sid.lr_date:
+            eway_dt.TransDocDt = getdate(sid.lr_date).strftime("%d/%m/%Y")
     else:
-        # eway_dt.TransDocNo = sid.lr_no
-        eway_dt.VehNo = sid.lr_no
+        # Self pickup: the vehicle number was kept in lr_no before vehicle_no existed
+        eway_dt.VehNo = sid.vehicle_no or sid.lr_no
         eway_dt.VehType = "R"
     return eway_dt
 
@@ -642,113 +450,6 @@ def get_einv_supply_type(gst_category, exp_type=None):
         frappe.throw(message)
     return stype
 
-
-
-def add_qr_code_size(url, qr_size=250):
-    """
-    Adds the QR Code size to the URL and returns the full URL
-    """
-    full_url = f"{url}&QrCodeSize={qr_size}"
-    return full_url
-
-
-def get_full_einv_url(api="ping_vital", gstin=None):
-    """
-    Returns full url for an API
-    """
-
-    aspid, asppass = get_aspid_pass()
-    base_url, sbox = get_base_url()
-    einv_id, einv_pass = get_eway_pass(sbox=sbox)
-    if not gstin:
-        gstin = get_default_gstin(sbox=sbox)
-    api_details = get_einv_api(api=api)
-    if sbox == 1:
-        full_url = f"{base_url}"
-    else:
-        full_url = f"{base_url[:8]}einvapi.{base_url[8:]}"
-    full_url += f"/{api_details['type']}/"
-    if api_details.get("version"):
-        full_url += f"{api_details['version']}/"
-    full_url += f"{api_details['action']}?aspid={aspid}&password={asppass}&Gstin={gstin}"
-    if api_details.get("uname") == 1:
-        full_url += f"&user_name={einv_id}&eInvPwd={einv_pass}"
-    if api_details.get("auth_token") == 1:
-        auth_token = get_auth_token_if_needed()
-        full_url += f"&AuthToken={auth_token}"
-    return full_url
-
-
-def get_auth_token_if_needed():
-    """
-    Checks the auth Token in Database and if renewal needed then renews else returns existing
-    """
-    rset = frappe.get_single('Rohit Settings')
-    now_time = datetime.now()
-    ac_token_time = get_datetime(rset.access_token_time)
-    if not rset.access_token_time:
-        time_diff_secs = 0
-    else:
-        time_diff_secs = (ac_token_time - now_time).total_seconds()
-    # Check if access token is expired then generate new
-    if time_diff_secs <= 0:
-        res_json = get_einv_auth_token()
-        if flt(res_json.get("Status")) == 1:
-            data = res_json.get('Data')
-            access_token = data.get("AuthToken")
-            rset.access_token = access_token
-            rset.access_token_time = get_datetime(data.get("TokenExpiry"))
-            rset.save()
-            frappe.db.commit()
-            rset.reload()
-        else:
-            print(f"Error while fetching the Auth Token {res_json}")
-            exit()
-    else:
-        access_token = rset.access_token
-    return access_token
-
-
-def get_einv_auth_token():
-    """
-    Gets the eInvoice Auth Token from the Server
-    """
-    api = 'auth'
-    full_url = get_full_einv_url(api=api)
-    response = requests.get(url=full_url, timeout=TIMEOUT)
-    return response.json()
-
-
-def get_einv_api(api):
-    """
-    Returns dictionary for API details for E-Invoices
-    """
-
-    api_details = {}
-    einv_api = [
-        {"api": "ping_vital", "version": "v1.04", "type": "eivital", "action": "heartbeat/ping"},
-        {"api": "ping_core", "type": "eicore", "action": "heartbeat/ping"},
-        {"api": "ping_eway", "type": "eiewb", "action": "heartbeat/ping"},
-        {"api": "auth", "version": "dec/v1.04", "type": "eivital", "action":"auth", "uname":1},
-        {"api": "generate_irn", "version": "dec/v1.03", "type": "eicore", "action": "Invoice",
-        "uname":1, "auth_token":1},
-        {"api": "get_irn", "version": "dec/v1.03", "type": "eicore", "action": "Invoice/irn",
-        "uname":1, "auth_token":1},
-        {"api": "get_irn_by_doc", "version": "dec/v1.03", "type": "eicore", "action": "Invoice/irn",
-        "uname":1, "auth_token":1},
-        {"api": "gen_eway_irn", "version": "dec/v1.03", "type": "eiewb", "action": "ewaybill",
-        "uname":1, "auth_token":1},
-        {"api": "get_eway_irn", "version": "dec/v1.03", "type": "eicore", "action": "ewaybill/irn/",
-        "uname":1, "auth_token":1},
-        {"api": "cancel_eway", "version": "dec/v1.03", "type": "eicore", "action": "CANEWB",
-        "uname":1, "auth_token":1},
-        {"api": "cancel_irn", "version": "dec/v1.03", "type": "eicore", "action": "Invoice/Cancel",
-        "uname":1, "auth_token":1}
-    ]
-    for row in einv_api:
-        if row["api"] == api:
-            api_details = row
-    return api_details
 
 def einv_needed(dtype, dname):
     """

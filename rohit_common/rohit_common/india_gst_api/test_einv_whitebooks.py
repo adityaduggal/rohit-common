@@ -2,33 +2,34 @@
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
 """
-Unit tests for einv.py's WhiteBooks.in e-invoice functions (T3, docs/
-designs/gst-asp-migration-whitebooks.md) — request wiring, response
-handling, and the duplicate-IRN idempotency path — all mocked (frappe,
-requests, whitebooks_provider), no live site or WhiteBooks credentials
-required.
+Tests for einv.py on WhiteBooks (issues #17, #19):
+- generate_irn(): success, duplicate IRN (2150), rejection, and the optional
+  e-Way Bill from the IRN. whitebooks_provider.einvoice_request is mocked.
+- update_irn_details() on the real site: it saves irn, ack_no, ack_date and
+  signed_qr_code and makes no QR PNG File.
+- The Domestic Invoice print draws the QR from signed_qr_code.
+- TestSandboxRoundTrip runs against the WhiteBooks sandbox only when the site is
+  in the sandbox and site_config has whitebooks_sandbox_test_invoice (a
+  submitted Sales Invoice that has no IRN yet).
+- The HSN description regression on the payload builder.
 
-Also covers the description-substitution regression: get_einv_item_details()
-(the shared, vendor-agnostic payload builder — untouched by this migration
-per Premise 3) must keep sending the HSN code's generic description instead
-of the item's real description. This guards against a future refactor
-silently dropping that privacy behavior, regardless of which HTTP layer
-calls it.
+Writes run in one transaction that is rolled back (SiteTestCase).
 
-The response envelope these functions parse (_parse_generate_irn_response,
-WHITEBOOKS_DUPLICATE_IRN_ERROR_CODE) is an UNVERIFIED ASSUMPTION — see the
-module note in einv.py above generate_irn_whitebooks(). These tests prove
-the code behaves correctly against that assumed shape; they do not prove
-the assumption itself is correct. That needs a real WhiteBooks sandbox call
-(The Assignment).
-
-Run: <bench-root>/env/bin/python -m pytest rohit_common/rohit_common/india_gst_api/test_einv_whitebooks.py -v
+Run: bench --site dev-rb-v12 run-tests --module rohit_common.rohit_common.india_gst_api.test_einv_whitebooks
 """
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
+import frappe
 
 from rohit_common.rohit_common.india_gst_api import einv
+from rohit_common.rohit_common.india_gst_api.common import use_gst_sandbox
+from rohit_common.rohit_common.scheduled_tasks.test_auto_einvoice_tasks import SiteTestCase
+
+EINV = "rohit_common.rohit_common.india_gst_api.einv"
+IRN_REPLY = {"Irn": "IRN123", "AckNo": 112010000000001, "AckDt": "2026-10-27 10:00:00",
+             "SignedQRCode": "eyJhbGciOi.signed.qr"}
 
 
 class _FakeFrappeDict(dict):
@@ -47,263 +48,153 @@ class _FakeFrappeDict(dict):
         self[name] = value
 
 
-def _fake_response(status_code=200, json_body=None, text=""):
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.json.return_value = json_body if json_body is not None else {}
-    resp.text = text
-    resp.raise_for_status = MagicMock()
-    return resp
+@patch(f"{EINV}.auto_ewb_needed", return_value=False)
+@patch(f"{EINV}.update_irn_details")
+@patch(f"{EINV}.gen_einv_json", return_value='{"Version": "1.1"}')
+@patch(f"{EINV}.whitebooks_provider.einvoice_request")
+class TestGenerateIrn(unittest.TestCase):
+    def test_success_saves_the_irn(self, mock_request, _json, mock_update, _ewb):
+        mock_request.return_value = {"status_cd": "Sucess", "data": IRN_REPLY}
 
+        einv.generate_irn("Sales Invoice", "SINV-0001")
 
-class TestGenerateIrnWhitebooks(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.einv.update_irn_details")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.gen_einv_json")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    def test_success_updates_irn_details(
-        self, mock_requests, mock_wb, mock_gen_json, mock_update
-    ):
-        mock_gen_json.return_value = '{"fake": "payload"}'
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {"Authorization": "Bearer tok"}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.post.return_value = _fake_response(
-            200, {"data": {"Irn": "IRN123", "AckNo": "ACK1", "AckDt": "2026-08-22",
-                            "SignedQRCode": "qr-payload"}}
-        )
+        mock_request.assert_called_once_with("POST", "GENERATE", body='{"Version": "1.1"}')
+        mock_update.assert_called_once_with("Sales Invoice", "SINV-0001", IRN_REPLY)
 
-        einv.generate_irn_whitebooks("Sales Invoice", "SINV-0001")
-
-        mock_update.assert_called_once_with(
-            "Sales Invoice", "SINV-0001",
-            {"Irn": "IRN123", "AckNo": "ACK1", "AckDt": "2026-08-22", "SignedQRCode": "qr-payload"},
-        )
-        called_url = mock_requests.post.call_args.kwargs["url"]
-        self.assertTrue(called_url.endswith("/generate"))
-        self.assertEqual(mock_requests.post.call_args.kwargs["headers"]["Authorization"], "Bearer tok")
-
-    @patch("rohit_common.rohit_common.india_gst_api.einv.get_irn_details_whitebooks_by_doc")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.update_irn_details")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.gen_einv_json")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    def test_duplicate_irn_looks_up_existing_and_updates(
-        self, mock_requests, mock_wb, mock_gen_json, mock_update, mock_lookup
-    ):
-        mock_gen_json.return_value = '{"fake": "payload"}'
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.post.return_value = _fake_response(
-            409, {"error_code": "2150", "message": "duplicate IRN"}
-        )
-        mock_lookup.return_value = {"Irn": "EXISTING-IRN"}
-
-        einv.generate_irn_whitebooks("Sales Invoice", "SINV-0001")
+    def test_duplicate_irn_fetches_the_existing_one(self, mock_request, _json, mock_update, _ewb):
+        mock_request.return_value = {
+            "status_cd": "0", "status_desc": '[{"ErrorCode":"2150","ErrorMessage":"Duplicate IRN"}]'}
+        with patch(f"{EINV}.get_irn_by_doc", return_value=IRN_REPLY) as mock_lookup:
+            einv.generate_irn("Sales Invoice", "SINV-0001")
 
         mock_lookup.assert_called_once_with("Sales Invoice", "SINV-0001")
-        mock_update.assert_called_once_with("Sales Invoice", "SINV-0001", {"Irn": "EXISTING-IRN"})
+        mock_update.assert_called_once_with("Sales Invoice", "SINV-0001", IRN_REPLY)
 
-    @patch("rohit_common.rohit_common.india_gst_api.einv.update_irn_details")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.gen_einv_json")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.frappe")
-    def test_non_duplicate_failure_logs_and_throws(
-        self, mock_frappe, mock_requests, mock_wb, mock_gen_json, mock_update
-    ):
-        mock_gen_json.return_value = '{"fake": "payload"}'
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.post.return_value = _fake_response(
-            500, {"error_code": "SERVER_ERROR"}, text="internal error"
-        )
-        mock_frappe.throw.side_effect = RuntimeError
-        mock_frappe.get_desk_link.return_value = "Sales Invoice SINV-0001"
+    def test_rejection_throws_with_the_codes(self, mock_request, _json, mock_update, _ewb):
+        mock_request.return_value = {
+            "status_cd": "0", "status_desc": '[{"ErrorCode":"2172","ErrorMessage":"Invalid Buyer GSTIN"}]'}
 
-        with self.assertRaises(RuntimeError):
-            einv.generate_irn_whitebooks("Sales Invoice", "SINV-0001")
-
-        mock_frappe.log_error.assert_called_once()
+        with self.assertRaisesRegex(frappe.ValidationError, "2172"):
+            einv.generate_irn("Sales Invoice", "SINV-0001")
         mock_update.assert_not_called()
 
+    def test_ewb_failure_keeps_the_irn_and_logs(self, mock_request, _json, mock_update, mock_ewb_needed):
+        mock_request.return_value = {"status_cd": "Sucess", "data": IRN_REPLY}
+        mock_ewb_needed.return_value = True
+        with patch(f"{EINV}.generate_ewb_by_irn", side_effect=frappe.ValidationError("No vehicle")), \
+                patch(f"{EINV}.frappe.db") as mock_db, patch(f"{EINV}.frappe.log_error") as mock_log:
+            einv.generate_irn("Sales Invoice", "SINV-0001")  # must not raise
 
-class TestGenerateIrnWhitebooksBulk(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.einv.gen_einv_json")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.frappe")
-    def test_generates_unique_submission_id_per_invoice(
-        self, mock_frappe, mock_requests, mock_wb, mock_gen_json
-    ):
-        mock_frappe.generate_hash.side_effect = ["sid-1", "sid-2", "sid-3"]
-        mock_gen_json.return_value = "{}"
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.post.return_value = _fake_response(200, {})
-
-        submission_ids, _ = einv.generate_irn_whitebooks_bulk(
-            "Sales Invoice", ["SINV-1", "SINV-2", "SINV-3"]
-        )
-
-        self.assertEqual(
-            submission_ids, {"SINV-1": "sid-1", "SINV-2": "sid-2", "SINV-3": "sid-3"}
-        )
-        self.assertEqual(len(set(submission_ids.values())), 3)
-
-    @patch("rohit_common.rohit_common.india_gst_api.einv.gen_einv_json")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.frappe")
-    def test_embeds_reference_id_in_each_invoice_payload(
-        self, mock_frappe, mock_requests, mock_wb, mock_gen_json
-    ):
-        mock_frappe.generate_hash.side_effect = ["sid-1", "sid-2"]
-        mock_gen_json.side_effect = ['{"DocDtls": {"No": "SINV-1"}}', '{"DocDtls": {"No": "SINV-2"}}']
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.post.return_value = _fake_response(200, {})
-
-        einv.generate_irn_whitebooks_bulk("Sales Invoice", ["SINV-1", "SINV-2"])
-
-        sent_body = mock_requests.post.call_args.kwargs["json"]
-        self.assertEqual(len(sent_body["invoices"]), 2)
-        self.assertEqual(sent_body["invoices"][0]["_referenceId"], "sid-1")
-        self.assertEqual(sent_body["invoices"][1]["_referenceId"], "sid-2")
-
-    @patch("rohit_common.rohit_common.india_gst_api.einv.gen_einv_json")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.frappe")
-    def test_posts_single_bulk_request_to_bulk_generate_endpoint(
-        self, mock_frappe, mock_requests, mock_wb, mock_gen_json
-    ):
-        mock_frappe.generate_hash.side_effect = ["sid-1", "sid-2"]
-        mock_gen_json.return_value = "{}"
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.post.return_value = _fake_response(200, {})
-
-        einv.generate_irn_whitebooks_bulk("Sales Invoice", ["SINV-1", "SINV-2"])
-
-        self.assertEqual(mock_requests.post.call_count, 1)
-        called_url = mock_requests.post.call_args.kwargs["url"]
-        self.assertTrue(called_url.endswith("/bulk-generate"))
-
-    @patch("rohit_common.rohit_common.india_gst_api.einv.gen_einv_json")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.frappe")
-    def test_partial_batch_maps_rejections_back_to_correct_invoice(
-        self, mock_frappe, mock_requests, mock_wb, mock_gen_json
-    ):
-        """Guards the partial-batch-failure requirement: some invoices
-        accepted, some rejected, in the same bulk call."""
-        mock_frappe.generate_hash.side_effect = ["sid-1", "sid-2", "sid-3"]
-        mock_gen_json.return_value = "{}"
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.post.return_value = _fake_response(
-            200,
-            {"rejected": [{"referenceId": "sid-2", "error": "Invalid GSTIN"}]},
-        )
-
-        submission_ids, immediate_rejections = einv.generate_irn_whitebooks_bulk(
-            "Sales Invoice", ["SINV-1", "SINV-2", "SINV-3"]
-        )
-
-        self.assertEqual(immediate_rejections, {"SINV-2": "Invalid GSTIN"})
-        self.assertNotIn("SINV-1", immediate_rejections)
-        self.assertNotIn("SINV-3", immediate_rejections)
-        self.assertEqual(len(submission_ids), 3)
-
-    @patch("rohit_common.rohit_common.india_gst_api.einv.gen_einv_json")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.frappe")
-    def test_no_rejections_means_all_accepted(
-        self, mock_frappe, mock_requests, mock_wb, mock_gen_json
-    ):
-        mock_frappe.generate_hash.side_effect = ["sid-1", "sid-2"]
-        mock_gen_json.return_value = "{}"
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.post.return_value = _fake_response(200, {})
-
-        _, immediate_rejections = einv.generate_irn_whitebooks_bulk(
-            "Sales Invoice", ["SINV-1", "SINV-2"]
-        )
-
-        self.assertEqual(immediate_rejections, {})
-
-    @patch("rohit_common.rohit_common.india_gst_api.einv.gen_einv_json")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.frappe")
-    def test_unknown_reference_id_in_rejection_is_ignored_not_crashed(
-        self, mock_frappe, mock_requests, mock_wb, mock_gen_json
-    ):
-        """A rejection for a referenceId we didn't send (shouldn't happen,
-        but the response shape is unverified) must not raise."""
-        mock_frappe.generate_hash.side_effect = ["sid-1"]
-        mock_gen_json.return_value = "{}"
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.post.return_value = _fake_response(
-            200, {"rejected": [{"referenceId": "not-a-real-sid", "error": "?"}]}
-        )
-
-        submission_ids, immediate_rejections = einv.generate_irn_whitebooks_bulk(
-            "Sales Invoice", ["SINV-1"]
-        )
-
-        self.assertEqual(immediate_rejections, {})
-        self.assertEqual(len(submission_ids), 1)
+        mock_update.assert_called_once()
+        mock_db.rollback.assert_called_once()
+        self.assertEqual(mock_log.call_args.args[1], einv.EWB_FAILURE_TITLE + "SINV-0001")
 
 
-class TestParseGenerateIrnResponse(unittest.TestCase):
-    def test_unwraps_data_key_when_present(self):
-        result = einv._parse_generate_irn_response({"data": {"Irn": "X"}})
-        self.assertEqual(result, {"Irn": "X"})
+class TestUpdateIrnDetails(SiteTestCase):
+    def get_invoice(self):
+        name = frappe.db.get_value("Sales Invoice", {"docstatus": 1})
+        if not name:
+            self.skipTest("Needs one submitted Sales Invoice")
+        return name
 
-    def test_falls_back_to_bare_body_when_no_data_key(self):
-        result = einv._parse_generate_irn_response({"Irn": "X"})
-        self.assertEqual(result, {"Irn": "X"})
+    def qr_files(self, name):
+        return frappe.get_all("File", filters={"attached_to_doctype": "Sales Invoice",
+            "attached_to_name": name, "attached_to_field": "qrcode_image", "creation": [">=", self.started]})
+
+    def test_saves_irn_and_signed_qr_code_without_a_png(self):
+        name = self.get_invoice()
+
+        einv.update_irn_details("Sales Invoice", name, dict(IRN_REPLY, EwbNo=331001234567))
+
+        saved = frappe.db.get_value("Sales Invoice", name,
+            ["irn", "ack_no", "ack_date", "signed_qr_code", "ewaybill"], as_dict=1)
+        self.assertEqual(saved, {"irn": "IRN123", "ack_no": "112010000000001",
+            "ack_date": "2026-10-27 10:00:00", "signed_qr_code": "eyJhbGciOi.signed.qr",
+            "ewaybill": "331001234567"})
+        self.assertFalse(self.qr_files(name))
+
+    def test_missing_qr_code_is_fetched_by_irn(self):
+        name = self.get_invoice()
+        reply = dict(IRN_REPLY, SignedQRCode=None)
+        with patch(f"{EINV}.get_irn_details", return_value={"SignedQRCode": "from-getirn"}) as mock_get:
+            einv.update_irn_details("Sales Invoice", name, reply)
+
+        mock_get.assert_called_once_with("IRN123")
+        self.assertEqual(frappe.db.get_value("Sales Invoice", name, "signed_qr_code"), "from-getirn")
+
+    def test_no_qr_code_at_all_saves_nothing(self):
+        name = self.get_invoice()
+        before = frappe.db.get_value("Sales Invoice", name, "irn")
+        with patch(f"{EINV}.get_irn_details", return_value={}):
+            with self.assertRaises(frappe.ValidationError):
+                einv.update_irn_details("Sales Invoice", name, dict(IRN_REPLY, SignedQRCode=None))
+        self.assertEqual(frappe.db.get_value("Sales Invoice", name, "irn"), before)
 
 
-class TestGetIrnDetailsWhitebooksByDoc(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.einv.whitebooks_provider")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.requests")
-    def test_builds_lookup_request_with_doc_no(self, mock_requests, mock_wb):
-        mock_wb.get_base_url.return_value = "https://apisandbox.whitebooks.in/einvoice"
-        mock_wb.get_headers.return_value = {}
-        mock_wb.EINVOICE = "einvoice"
-        mock_wb.call_with_token_retry.side_effect = lambda fn, api: fn()
-        mock_requests.get.return_value = _fake_response(200, {"Irn": "LOOKED-UP-IRN"})
+class TestAutoEwbNeeded(SiteTestCase):
+    def test_follows_the_checkbox_and_the_limit(self):
+        name = frappe.db.get_value("Sales Invoice", {"docstatus": 1, "base_grand_total": [">", 1000]})
+        if not name:
+            self.skipTest("Needs a submitted Sales Invoice over 1000")
+        frappe.db.set_value("Sales Invoice", name, "ewaybill", None, update_modified=False)
+        settings = {"auto_generate_ewb_from_irn": 1, "eway_bill_limit": 1}
+        frappe.db.set_value("Rohit Settings", "Rohit Settings", settings)
+        self.assertTrue(einv.auto_ewb_needed("Sales Invoice", name))
 
-        result = einv.get_irn_details_whitebooks_by_doc("Sales Invoice", "SINV-0001")
+        frappe.db.set_value("Rohit Settings", "Rohit Settings", "eway_bill_limit", 10 ** 12)
+        self.assertFalse(einv.auto_ewb_needed("Sales Invoice", name))
 
-        self.assertEqual(result, {"Irn": "LOOKED-UP-IRN"})
-        called_url = mock_requests.get.call_args.kwargs["url"]
-        self.assertTrue(called_url.endswith("/lookup"))
-        self.assertEqual(mock_requests.get.call_args.kwargs["params"], {"docNo": "SINV-0001"})
+        frappe.db.set_value("Rohit Settings", "Rohit Settings", settings)
+        frappe.db.set_value("Sales Invoice", name, "ewaybill", "331001234567", update_modified=False)
+        self.assertFalse(einv.auto_ewb_needed("Sales Invoice", name))
+
+        frappe.db.set_value("Rohit Settings", "Rohit Settings", "auto_generate_ewb_from_irn", 0)
+        frappe.db.set_value("Sales Invoice", name, "ewaybill", None, update_modified=False)
+        self.assertFalse(einv.auto_ewb_needed("Sales Invoice", name))
+
+
+class TestPrintDrawsQrFromSignedQrCode(SiteTestCase):
+    def test_domestic_invoice_print_has_the_qr_image(self):
+        if not frappe.db.exists("Print Format", "Domestic Invoice"):
+            self.skipTest("Needs the Domestic Invoice print format")
+        name = frappe.db.get_value("Sales Invoice", {"docstatus": 1, "is_return": 0})
+        if not name:
+            self.skipTest("Needs one submitted Sales Invoice")
+        frappe.db.set_value("Sales Invoice", name, {"signed_qr_code": "eyJhbGciOi.signed.qr",
+            "qrcode_image": None}, update_modified=False)
+
+        html = frappe.get_print("Sales Invoice", name, print_format="Domestic Invoice")
+
+        self.assertIn('src="data:image/png;base64,', html)
+
+
+class TestSandboxRoundTrip(SiteTestCase):
+    """Real WhiteBooks sandbox calls. The IRN stays on the sandbox, and the
+    invoice changes are rolled back."""
+
+    def setUp(self):
+        super().setUp()
+        self.name = frappe.conf.get("whitebooks_sandbox_test_invoice")
+        if not (self.name and use_gst_sandbox()):
+            self.skipTest("Set whitebooks_sandbox_test_invoice in site_config on a sandbox site")
+        frappe.db.set_value("Sales Invoice", self.name, {"irn": None, "ack_no": None, "ack_date": None,
+            "signed_qr_code": None}, update_modified=False)
+
+    def test_generate_then_duplicate_both_save_the_signed_qr_code(self):
+        with patch(f"{EINV}.auto_ewb_needed", return_value=False):
+            einv.generate_irn("Sales Invoice", self.name)
+            first = frappe.db.get_value("Sales Invoice", self.name, ["irn", "signed_qr_code"], as_dict=1)
+            self.assertTrue(first.irn and first.signed_qr_code)
+
+            frappe.db.set_value("Sales Invoice", self.name, {"irn": None, "signed_qr_code": None},
+                                update_modified=False)
+            einv.generate_irn("Sales Invoice", self.name)  # duplicate IRN path
+
+        second = frappe.db.get_value("Sales Invoice", self.name, ["irn", "signed_qr_code"], as_dict=1)
+        self.assertEqual(second.irn, first.irn)
+        self.assertTrue(second.signed_qr_code)
+        self.assertFalse(frappe.get_all("File", filters={"attached_to_name": self.name,
+            "attached_to_field": "qrcode_image", "creation": [">=", self.started]}))
 
 
 def _fake_hsn_doc(description, is_service=0):

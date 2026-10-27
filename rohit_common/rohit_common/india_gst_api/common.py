@@ -76,14 +76,13 @@ def get_numeric_state_code(state_name, country="India"):
 
 def get_default_gstin(sbox=0):
     """
-    Returns the default gstin mentioned in the Settings
+    Returns the GSTIN the e-Invoice and e-Way Bill APIs act for: Rohit Settings.gstin,
+    or the WhiteBooks sandbox GSTIN in the sandbox
     """
-    rset = frappe.get_doc("Rohit Settings", "Rohit Settings")
-    if sbox == 0:
-        def_gstin = rset.gstin
-    else:
-        def_gstin = rset.gstin
-
+    field = "whitebooks_sandbox_gstin" if sbox else "gstin"
+    def_gstin = frappe.db.get_single_value("Rohit Settings", field)
+    if not def_gstin:
+        frappe.throw(f"Set {frappe.unscrub(field)} in Rohit Settings", title="GSTIN Missing")
     return def_gstin
 
 
@@ -103,103 +102,6 @@ def use_gst_sandbox(rset=None):
         return True
     rset = rset or frappe.get_single("Rohit Settings")
     return bool(cint(rset.sandbox_mode))
-
-
-def get_base_url(sbox=0):
-    """
-    Returns the Base GST URL and Sandbox status as Integer in Settings
-    """
-    rset = frappe.get_doc("Rohit Settings", "Rohit Settings")
-    if sbox == 0:
-        # If the sandbox mode is default to ZERO then checks if Sbox is active in settings
-        sbox = cint(use_gst_sandbox(rset))
-    if sbox == 0:
-        api_link = rset.api_link
-    else:
-        api_link = rset.sandbox_api_link
-    return api_link, sbox
-
-
-def get_aspid_pass():
-    """
-    Returns the asp user ID and password
-    """
-    rset = frappe.get_doc("Rohit Settings", "Rohit Settings")
-    aspid = rset.tax_pro_asp_id
-    asppass = rset.tax_pro_password
-
-    return aspid, asppass
-
-
-def get_api_version(api):
-    api_version_list = [
-        {"api": "search", "version": "v1.1", "action": "TP"},
-        {"api": "returns", "version": "v1.0", "action": "TP"},
-        {"api": "asp", "version": "v1.0", "action": "TP"},
-        {"api": "eway", "version": "v1.03", "action": "TP"},
-        {"api": "search", "version": "v1.1", "action": "TP"},
-        {"api": "otp", "version": "v1.0", "action": "authenticate"},
-        {"api": "doc", "version": "v1.1", "action": "document"},
-        {"api": "doc_det", "version": "v1.1", "action": "returns"},
-        {"api": "gstr1_ret_status", "version": "v0.2", "action": "returns/gstr1"},
-        {"api": "gstr1", "version": "v2.1", "action": "returns/gstr1"},
-        {"api": "gstr2a", "version": "v2.0", "action": "returns/gstr2a"},
-        {"api": "gstr2b", "version": "v1.0", "action": "returns/gstr2b"},
-        {"api": "einv", "version": "v1.0", "action": "returns/gstr2b"}
-    ]
-    for row in api_version_list:
-        if row["api"] == api:
-            return row["version"], row["action"]
-
-
-def get_api_url(api, api_type=None):
-    version, act_type = get_api_version(api)
-    rset = frappe.get_single('Rohit Settings')
-    if api_type == "common":
-        api_url = '/' + api_type + 'api/' + version + '/' + api + '?'
-    elif api == 'eway':
-        if use_gst_sandbox(rset):
-            api_url = '/' + api + 'billapi/dec/' + version + '/'
-        else:
-            api_url = '/' + version + '/dec/'
-    elif api == 'asp':
-        api_url = '/' + api + 'api/' + version + '/'
-    return api_url
-
-
-def get_gsp_details(api, action, gstin=None, api_type=None):
-    rset = frappe.get_single('Rohit Settings')
-    sandbox = cint(use_gst_sandbox(rset))
-    gsp_link = rset.api_link
-    asp_id = rset.tax_pro_asp_id
-    asp_pass = rset.tax_pro_password
-
-    if api == 'eway':
-        gsp_link = gsp_link[:8] + "einvapi." + gsp_link[8:]
-    else:
-        gsp_link = gsp_link[:8] + "gstapi." + gsp_link[8:]
-
-
-    if not gstin:
-        if api_type == 'common':
-            gstin = rset.gstin
-        else:
-            if sandbox == 1:
-                gstin = '05AAACG1539P1ZH'
-            else:
-                gstin = rset.gstin
-
-    gsp_sandbox_link = rset.sandbox_api_link
-    api_url = '/' + api
-    if api_type == "common":
-        api_url = get_api_url(api=api, api_type=api_type)
-    else:
-        if sandbox == 1:
-            gsp_link = gsp_sandbox_link
-    if api_type == 'common':
-        gsp_link = gsp_link + api_url + 'aspid=' + asp_id + '&password=' + asp_pass + '&Action=' + action
-
-    return gsp_link, asp_id, asp_pass, gstin, sandbox
 
 
 def gst_return_period_validation(return_period):

@@ -7,7 +7,8 @@ docs/designs/gst-asp-migration-whitebooks.md).
 
 `Sales Invoice.qrcode_image` holds a rendered PNG for every historical
 e-invoice; the raw `SignedQRCode` string that PNG encodes was never
-persisted (see einv.py's `attach_qrcode()`). This module decodes the PNGs
+persisted (the Charteredinfo-era `attach_qrcode()`, removed 2026-10-27, kept
+only the PNG). This module decodes the PNGs
 back into `signed_qr_code`. Runbook: docs/qr-backfill-runbook.md.
 
 A decode is accepted only if re-rendering the text with

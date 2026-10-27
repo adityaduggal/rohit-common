@@ -44,7 +44,7 @@ class TestQrRender(unittest.TestCase):
         self.assertEqual(qr_backfill._decode_bytes_to_text(png_bytes), SIGNED_QR)
 
     def test_rendered_png_has_historical_qrcode_image_shape(self):
-        # einv.attach_qrcode() PNGs are 1-bit, 2px modules, 1-module quiet zone.
+        # The removed einv.attach_qrcode() PNGs are 1-bit, 2px modules, 1-module quiet zone.
         image = Image.open(BytesIO(render_einvoice_qr_png(SIGNED_QR)))
 
         self.assertEqual(image.mode, "1")

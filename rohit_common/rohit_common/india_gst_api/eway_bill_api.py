@@ -1,16 +1,25 @@
 #  Copyright (c) 2021. Rohit Industries Group Private Limited and Contributors.
 #  For license information, please see license.txt
+"""
+e-Way Bill API on WhiteBooks.in, and the helpers that build and read e-Way Bill
+JSON. Charteredinfo/TaxPro was removed 2026-10-27 (issue #19). The request,
+session and reply envelope live in whitebooks_provider.eway_request().
 
+Each API function returns the unwrapped `data` of the reply and throws with
+the error codes otherwise. WhiteBooks has no detailed-print API.
+
+UNVERIFIED until the first sandbox run of whitebooks_sandbox_probe.py: the
+"e-Way Bill already generated" code (NIC uses 604).
+"""
 import re
 import frappe
-import requests
-from datetime import datetime, timedelta
-from frappe.utils import get_datetime, getdate
-from frappe.utils.file_manager import save_file
+from datetime import datetime
+from frappe.utils import getdate
 from . import whitebooks_provider
-from .common import get_base_url, get_aspid_pass, get_default_gstin
 from ..validations.google_maps import get_distance_matrix, get_approx_dist_frm_matrix
-TIMEOUT=5
+DUPLICATE_EWB_ERROR_CODE = "604"
+# NIC cancel reason codes: 1 Duplicate, 2 Data Entry Mistake, 3 Order Cancelled, 4 Others
+CANCEL_REASON_OTHERS = 4
 
 
 def get_eway_distance(frm_adr_name, to_adr_name):
@@ -27,122 +36,77 @@ def get_eway_distance(frm_adr_name, to_adr_name):
 
 def create_ewb_from_json(ewb_json):
     """
-    Creates eway bill from JSON
+    Creates eway bill from JSON. If the document already has an e-Way Bill, that
+    one is returned.
     """
-    action = 'GENEWAYBILL'
-    res_json = process_ewb_post_request(api=api, action=action, json_data=ewb_json)
-    return res_json
+    resp = whitebooks_provider.eway_request("POST", "genewaybill", body=ewb_json)
+    if not whitebooks_provider.is_success(resp) and \
+            DUPLICATE_EWB_ERROR_CODE in whitebooks_provider.error_codes(resp):
+        return get_ewb_by_dt_dn(ewb_json.get("docType"), ewb_json.get("docNo"))
+    return whitebooks_provider.unwrap(resp, f"e-Way Bill generation for {ewb_json.get('docNo')}")
 
 
-def cancel_ewb(ewb_no):
-    action = 'CANEWB'
-    res_json = process_ewb_post_request(api=api, action=action, json_data=ewb_json)
+def cancel_ewb(ewb_no, reason_code=CANCEL_REASON_OTHERS, remark="Cancelled in ERP"):
+    body = {"ewbNo": int(ewb_no), "cancelRsnCode": reason_code, "cancelRmrk": remark[:50]}
+    resp = whitebooks_provider.eway_request("POST", "canewb", body=body)
+    return whitebooks_provider.unwrap(resp, f"e-Way Bill {ewb_no} cancellation")
 
 
 def update_partb_ewb(ewb_doc):
-    action = 'VEHEWB'
     ewb_veh_data = {}
     for veh in ewb_doc.vehicles:
-        ewb_veh_data['ewbNo'] = ewb_doc.eway_bill_no
+        ewb_veh_data['ewbNo'] = int(ewb_doc.eway_bill_no)
         if veh.vehicle_number:
             ewb_veh_data['vehicleNo'] = veh.vehicle_number
-            ewb_veh_data['transMode'] = get_transport_mode(veh.mode_of_transport)
+            ewb_veh_data['transMode'] = str(get_transport_mode(veh.mode_of_transport))
         ewb_veh_data['fromPlace'] = veh.from_place
         ewb_veh_data['fromState'] = veh.from_state_number
         ewb_veh_data['reasonRem'] = 'First Time'
-        ewb_veh_data['reasonCode'] = 4
+        ewb_veh_data['reasonCode'] = '4'
         if veh.transport_doc_no:
             ewb_veh_data['transDocNo'] = veh.transport_doc_no
             ewb_veh_data['transDocDate'] = (getdate(veh.transport_doc_date)).strftime('%d/%m/%Y')
-            ewb_veh_data['transMode'] = 4
-    res_json = process_ewb_post_request(api=api, action=action, json_data=ewb_veh_data)
-    ewb_doc.json_reply = str(res_json)
-    return res_json
+            ewb_veh_data['transMode'] = '4'
+    resp = whitebooks_provider.eway_request("POST", "vehewb", body=ewb_veh_data)
+    return whitebooks_provider.unwrap(resp, f"Part-B update of e-Way Bill {ewb_doc.eway_bill_no}")
 
 
-def get_eway_bill_details(ewb_no, raw_resp=0):
-    api = "ewayapi"
-    action = 'GetEwayBill'
-    param_dt = {"param": "ewbNo", "param_val": ewb_no}
-    res_json = process_ewb_get_request(api=api, action=action, param_dt=param_dt, raw_resp=raw_resp)
-    return res_json
+def extend_ewb_validity(ewb_no, details):
+    """
+    Extends an e-Way Bill. details holds fromPlace, fromPincode, fromState,
+    remainingDistance, extnRsnCode, extnRemarks, consignmentStatus and the
+    vehicle or transit fields, as the API needs them.
+    """
+    body = dict(details, ewbNo=int(ewb_no))
+    resp = whitebooks_provider.eway_request("POST", "extendvalidity", body=body)
+    return whitebooks_provider.unwrap(resp, f"Validity extension of e-Way Bill {ewb_no}")
 
 
-def get_ewb_by_dt_dn(dt, dn):
-    action = 'GetEwayBillGeneratedByConsigner'
-    parameter = 'docType'
-    parm2 = 'docNo'
-    dt_code = get_doctype(text=dt)
-    res_json = process_ewb_get_request(api=api, action=action, parm_name=parameter, parm_val=dt_code, parm_name2=parm2,
-                                       parm_val2=dn)
-    return res_json
+def get_eway_bill_details(ewb_no):
+    resp = whitebooks_provider.eway_request("GET", "getewaybill", params={"ewbNo": ewb_no})
+    return whitebooks_provider.unwrap(resp, f"e-Way Bill {ewb_no} lookup")
+
+
+def get_ewb_by_dt_dn(dt_code, dn):
+    """
+    e-Way Bill of a document, by its e-Way Bill document type code (INV, CHL, ...)
+    and number
+    """
+    resp = whitebooks_provider.eway_request(
+        "GET", "getewaybillgeneratedbyconsigner", params={"docType": dt_code, "docNo": dn})
+    return whitebooks_provider.unwrap(resp, f"e-Way Bill lookup for {dt_code} {dn}")
 
 
 def get_ewb_date(ewb_date):
-    api = "ewayapi"
-    action = "GetEwayBillsByDate"
-    param_dt = {"param": "date", "param_val": ewb_date}
-    res_json = process_ewb_get_request(api=api, action=action, param_dt=param_dt)
-    return res_json
+    """e-Way Bills generated by this GSTIN on a date (dd/mm/yyyy)"""
+    resp = whitebooks_provider.eway_request("GET", "getewaybillsbydate", params={"date": ewb_date})
+    return whitebooks_provider.unwrap(resp, f"e-Way Bills of {ewb_date}") or []
 
 
 def get_ewb_others(ewb_date):
-    action = 'GetEwayBillsofOtherParty'
-    parameter = 'date'
-    res_json = process_ewb_get_request(api=api, action=action, parm_name=parameter, parm_val=ewb_date)
-    return res_json
-
-
-def get_ewb_detailed_print(ewbdoc, json_data):
-    api = 'aspapi'
-    action = 'printdetailewb'
-    response = process_print_request(ewbdoc=ewbdoc, api=api, action=action, json=json_data,
-        gstin=ewbdoc.generated_by)
-    return response
-
-
-def process_print_request(ewbdoc, api, action, json, gstin=None):
-    """
-    Process print Request and Saves the file for detailed eWay Print with eWay Doc
-    """
-    base_url, sbox = get_base_url()
-    print_url = get_eway_url(base_url, sbox)
-    aspid, asppass = get_aspid_pass()
-    api_details = get_eway_api(api=api, action=action)
-    if not gstin:
-        gstin = get_default_gstin()
-    full_url = f"{print_url}/{api}/{api_details['version']}/{action}?"
-    full_url += f"aspid={aspid}&password={asppass}&Gstin={gstin}"
-    response = requests.post(url=full_url, json=json, timeout=TIMEOUT)
-    image_data = response.content
-    save_file(f"{ewbdoc.eway_bill_no}.pdf", image_data, ewbdoc.doctype, ewbdoc.name, is_private=1)
-    return response
-
-
-def process_ewb_post_request(api, action, json_data):
-    full_url = get_ewb_url(api, action)
-    response = requests.post(url=full_url, json=json_data, timeout=TIMEOUT)
-    res_json = response.json()
-    ewb_no = res_json.get('ewayBillNo', "")
-    if ewb_no == "":
-        ewb_no = res_json.get('ewbNo', "")
-    if ewb_no != "":
-        if int(res_json.get('status_cd', 1)) == 1:
-            return res_json
-        elif int(res_json.get('status_cd')) == 0:
-            frappe.msgprint('Error Returned from GST Server Check Logs')
-            frappe.msgprint(str(res_json.get('error')))
-    else:
-        return res_json
-
-
-def get_ewb_url(api, action):
-    gsp_link, aspid, asppass, gstin, sandbox = get_gsp_details(api=api, action=action)
-    auth_token = get_ewb_access_token()
-    api_url = get_api_url(api)
-    url = gsp_link + api_url + api + 'api?action=' + action + '&aspid=' + aspid + '&password=' + asppass + \
-               '&gstin=' + gstin + '&authtoken=' + auth_token
-    return url
+    """e-Way Bills that other parties generated on this GSTIN on a date (dd/mm/yyyy)"""
+    resp = whitebooks_provider.eway_request("GET", "getewaybillsofotherparty", params={"date": ewb_date})
+    return whitebooks_provider.unwrap(resp, f"e-Way Bills of other parties on {ewb_date}") or []
 
 
 def get_supply_type(data, text):
@@ -413,9 +377,7 @@ def search_existing_ewb(ewb_no):
     """
     Searchs for Existing Eway Bill in DB based on Eway Bill No
     """
-    exist_ewb = frappe.db.sql("""SELECT name FROM `tabeWay Bill` WHERE eway_bill_no = '%s'
-    AND docstatus != 2""" %(ewb_no), as_dict=1)
-    return exist_ewb
+    return frappe.get_all("eWay Bill", filters={"eway_bill_no": ewb_no, "docstatus": ["!=", 2]})
 
 
 def ewb_from_ewb_summary(ewbj):
@@ -568,225 +530,3 @@ def others_ewb_from_summary(ewbj):
         text = 'Updated'
     frappe.msgprint(f"{text} {frappe.get_desk_link('eWay Bill', ewb.name)} with eWay Bill# \
         {ewb.eway_bill_no}")
-
-
-def get_ewb_access_token():
-    """
-    Checks the auth token in DB if expired or is going to expire in 10 mins or 600 secs
-    then calls and gets the Auth token refreshed from Server
-    """
-    rset = frappe.get_single('Rohit Settings')
-    now_time = datetime.now()
-    ac_token_time = get_datetime(rset.access_token_time)
-    if not rset.access_token_time:
-        time_diff_secs = 0
-    else:
-        time_diff_secs = (ac_token_time - now_time).total_seconds()
-    # Only Need Access Token after 6 hours of getting the first one since Access Token is Valid
-    # for 6 hours once taken from server and call only when its expired
-    if time_diff_secs <= 0:
-        res_json = get_eway_auth_token()
-        if res_json.get("status") == '1':
-            access_token = res_json.get("authtoken")
-            rset.access_token = access_token
-            rset.access_token_time = now_time + timedelta(hours=6)
-            rset.save()
-            frappe.db.commit()
-            rset.reload()
-        else:
-            print(f"Error while fetching the Auth Token {res_json}")
-            exit()
-    else:
-        access_token = rset.access_token
-    return access_token
-
-
-def get_eway_auth_token():
-    """
-    Gets the eWay Bill Auth Token from the Server
-    """
-    api = 'auth'
-    full_url = get_full_eway_url(api=api)
-    response = requests.get(url=full_url, timeout=TIMEOUT)
-    print(response.json())
-    return response.json()
-
-
-def process_ewb_get_request(api, action=None, param_dt=None, raw_resp=0):
-    """
-    Returns the Eway Response based on API and Param Dict
-    """
-    full_url = get_full_eway_url(api=api, action=action, param_dt=param_dt)
-    response = requests.get(url=full_url, timeout=TIMEOUT)
-    if raw_resp == 1:
-        res_json = response
-    else:
-        res_json = response.json()
-    return res_json
-
-
-def get_full_eway_url(api="auth", action=None, gstin=None, param_dt=None):
-    """
-    Returns full eWay bill related URL based on the API being used
-    """
-    aspid, asppass = get_aspid_pass()
-    eway_uname, eway_pass = get_eway_pass()
-    base_url, sbox = get_base_url()
-    api_details = get_eway_api(api, action=action)
-    if not gstin:
-        gstin = get_default_gstin()
-
-    full_url = get_eway_url(base_url, sbox)
-    if api_details.get("version"):
-        full_url += f"/{api_details['version']}/dec"
-    full_url += f"/{api}?action={api_details['action']}&aspid={aspid}&password={asppass}"
-    full_url += f"&gstin={gstin}&username={eway_uname}&ewbpwd={eway_pass}"
-
-    if api_details.get("token", 0) == 1:
-        auth_token = get_ewb_access_token()
-        full_url += f"&authtoken={auth_token}"
-
-    if param_dt:
-        if param_dt.get("param", None):
-            full_url += f"&{param_dt['param']}={param_dt['param_val']}"
-        if param_dt.get("param2", None):
-            full_url += f"&{param_dt['param2']}={param_dt['param_val2']}"
-    print(full_url)
-    return full_url
-
-
-def get_eway_url(base_url, sbox):
-    """
-    Returns the URL based on Sandbox or not
-    """
-    if sbox == 1:
-        full_url = f"{base_url}"
-    else:
-        full_url = f"{base_url[:8]}einvapi.{base_url[8:]}"
-    return full_url
-
-
-def get_eway_pass(sbox=0):
-    """
-    Returns the E-Invoices user ID and password.
-
-    Sandbox previously returned a hardcoded test credential here (a secret
-    committed to source) instead of reading configuration — removed
-    2026-08-22. There is no dedicated sandbox eway_bill_id/password field on
-    Rohit Settings, so sandbox mode now fails loud instead of silently using
-    a stale hardcoded value or the production credential against a sandbox
-    endpoint. This Charteredinfo-specific function is scheduled for deletion
-    at T5's actual cutover (docs/designs/gst-asp-migration-whitebooks.md)
-    once the WhiteBooks e-way bill path is sandbox-verified — not worth
-    adding new config surface for code on its way out.
-    """
-    rset = frappe.get_doc("Rohit Settings", "Rohit Settings")
-    if sbox != 0:
-        frappe.throw(
-            "No sandbox eway_bill_id/password is configured on Rohit Settings — "
-            "the previous hardcoded sandbox credential was removed as a committed "
-            "secret. This function is being replaced by the WhiteBooks e-way bill "
-            "path; if sandbox testing of the Charteredinfo path is still needed, "
-            "configure dedicated sandbox fields rather than reintroducing a "
-            "hardcoded value."
-        )
-    return rset.eway_bill_id, rset.eway_bill_password
-
-
-# ---------------------------------------------------------------------------
-# WhiteBooks.in equivalents (T5, docs/designs/gst-asp-migration-whitebooks.md)
-#
-# PLUMBING ONLY, per Premise 1: e-Way Bill business rules (what triggers
-# generation, vehicle/transporter assembly) are explicitly deferred to a
-# separate scoping doc — see TODOS.md "e-Way Bill generation trigger rules".
-# These functions are the auth/HTTP layer only, mirroring the payload shapes
-# the existing (also-unused-in-production) Charteredinfo functions above
-# assemble — NOT wired into any live call path, since e-way bill has no
-# production call sites to swap yet.
-#
-# Endpoint paths below ARE the ones WhiteBooks' own e-Way Bill API docs
-# advertise (confirmed via WebSearch, 2026-08-22: "POST /generate-ewb,
-# POST /bulk-generate, PUT /update-part-b, PUT /extend, POST /cancel") —
-# more concrete than the guessed paths in einv.py/gst_public_api.py, but
-# still UNVERIFIED against a real sandbox response/request shape. The
-# request body shape below is NOT confirmed — WhiteBooks' e-way bill JSON
-# schema was not in the pages fetched during that search. Confirm both
-# against WhiteBooks' actual docs/sandbox before trusting this in
-# production, per The Assignment.
-# ---------------------------------------------------------------------------
-
-
-def generate_ewb_whitebooks(ewb_json):
-    """WhiteBooks.in equivalent of create_ewb_from_json(). ewb_json is
-    whatever payload-assembly produces once business rules are designed —
-    this function only owns the HTTP/auth layer, not payload construction."""
-    def _call():
-        return requests.post(
-            url=whitebooks_provider.get_base_url(whitebooks_provider.EWAY) + "/generate-ewb",
-            headers=whitebooks_provider.get_headers(whitebooks_provider.EWAY),
-            json=ewb_json,
-            timeout=TIMEOUT,
-        )
-
-    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EWAY)
-    response.raise_for_status()
-    return response.json()
-
-
-def cancel_ewb_whitebooks(ewb_no, reason=None):
-    """WhiteBooks.in equivalent of cancel_ewb()."""
-    body = {"ewbNo": ewb_no}
-    if reason:
-        body["reason"] = reason
-
-    def _call():
-        return requests.post(
-            url=whitebooks_provider.get_base_url(whitebooks_provider.EWAY) + "/cancel",
-            headers=whitebooks_provider.get_headers(whitebooks_provider.EWAY),
-            json=body,
-            timeout=TIMEOUT,
-        )
-
-    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EWAY)
-    response.raise_for_status()
-    return response.json()
-
-
-def update_part_b_whitebooks(ewb_no, vehicle_details):
-    """WhiteBooks.in equivalent of update_partb_ewb(). vehicle_details is
-    whatever payload-assembly produces once business rules are designed."""
-    body = dict(vehicle_details)
-    body["ewbNo"] = ewb_no
-
-    def _call():
-        return requests.put(
-            url=whitebooks_provider.get_base_url(whitebooks_provider.EWAY) + "/update-part-b",
-            headers=whitebooks_provider.get_headers(whitebooks_provider.EWAY),
-            json=body,
-            timeout=TIMEOUT,
-        )
-
-    response = whitebooks_provider.call_with_token_retry(_call, whitebooks_provider.EWAY)
-    response.raise_for_status()
-    return response.json()
-
-
-def get_eway_api(api, action=None):
-    """
-    Returns dictionary for API details for Eway Bills
-    """
-    api_details = {}
-    eway_api = [
-        {"api": "auth", "version": "v1.03", "action":"ACCESSTOKEN"},
-        {"api": "ewayapi", "version": "v1.03", "action":"GetEwayBillsByDate", "token": 1},
-        {"api": "ewayapi", "version": "v1.03", "action":"GetEwayBill", "token": 1},
-        {"api": "aspapi", "version": "v1.0", "action":"printdetailewb"}
-    ]
-    for row in eway_api:
-        if row["api"] == api:
-            if action:
-                if row["action"] == action:
-                    api_details = row
-            else:
-                api_details = row
-    return api_details

@@ -2,37 +2,36 @@
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
 """
-Unit tests for whitebooks_provider.py's base-URL selection, per-family
-OAuth2 token fetch/cache, header building, and the single-retry-on-401
-pattern — all mocked (frappe, requests), no live site or WhiteBooks
-credentials required.
+Unit tests for whitebooks_provider.py: base-URL selection, credentials, the
+reply envelope, and the e-Invoice / e-Way Bill clients (authenticate once,
+cache, re-authenticate once on an expired token, no URL in network errors).
+frappe and requests are mocked, so no site or WhiteBooks credentials are needed.
+The request shapes are the ones in WhiteBooks' Postman collections.
 
-Full end-to-end verification against WhiteBooks' real sandbox (The
-Assignment in docs/designs/gst-asp-migration-whitebooks.md) is a separate,
-manual step — these tests only prove the client behaves correctly against
-whatever WhiteBooks actually returns, once that shape is confirmed.
-
-Run: <bench-root>/env/bin/python -m pytest rohit_common/rohit_common/india_gst_api/test_whitebooks_provider.py -v
+Run: bench --site dev-rb-v12 run-tests --module rohit_common.rohit_common.india_gst_api.test_whitebooks_provider
 """
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import frappe
+import requests
+
 from rohit_common.rohit_common.india_gst_api import common
 from rohit_common.rohit_common.india_gst_api import whitebooks_provider as wb
 
-
-def _fake_response(status_code=200, json_body=None):
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.json.return_value = json_body or {}
-    resp.raise_for_status = MagicMock()
-    return resp
+WB = "rohit_common.rohit_common.india_gst_api.whitebooks_provider"
 
 
 def _fake_settings(sandbox_mode=0, **overrides):
     defaults = dict(
         sandbox_mode=sandbox_mode,
+        gstin="06AAACR1567J1ZC",
+        eway_bill_id="prod-api-user",
+        whitebooks_sandbox_gstin="29AAGCB1286Q000",
+        whitebooks_sandbox_api_username="sandbox-api-user",
+        whitebooks_gst_email="gsp@rigpl.com",
+        whitebooks_gst_ip_address="10.0.0.1",
         whitebooks_einv_client_id="einv-prod-id",
         whitebooks_einv_sandbox_client_id="einv-sandbox-id",
         whitebooks_gst_client_id="gst-prod-id",
@@ -42,91 +41,78 @@ def _fake_settings(sandbox_mode=0, **overrides):
     )
     defaults.update(overrides)
     ns = SimpleNamespace(**defaults)
-
-    def _fake_password(field):
-        return f"secret-for-{field}"
-
-    ns.get_password = MagicMock(side_effect=_fake_password)
+    ns.get_password = MagicMock(side_effect=lambda field, raise_exception=True: f"secret-for-{field}")
     return ns
 
 
-def frappe_throw_side_effect(msg):
+class _FakeCache:
+    def __init__(self):
+        self.values = {}
+
+    def get_value(self, key):
+        return self.values.get(key)
+
+    def set_value(self, key, value, expires_in_sec=None):
+        self.values[key] = value
+
+    def delete_value(self, key):
+        self.values.pop(key, None)
+
+
+def _raise(msg, *args, **kwargs):
     raise RuntimeError(msg)
 
 
-class TestGetBaseUrl(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_sandbox_mode_uses_sandbox_host(self, mock_frappe):
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
-        self.assertEqual(
-            wb.get_base_url(wb.EINVOICE), "https://apisandbox.whitebooks.in/einvoice"
-        )
+def _mock_frappe(mock_frappe, settings):
+    mock_frappe.get_single.return_value = settings
+    mock_frappe.throw.side_effect = _raise
+    mock_frappe._dict = frappe._dict
+    cache = _FakeCache()
+    mock_frappe.cache.return_value = cache
+    return cache
 
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.is_developer_mode", return_value=False)
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+
+def _reply(body):
+    resp = MagicMock()
+    resp.json.return_value = body
+    return resp
+
+
+class TestGetBaseUrl(unittest.TestCase):
+    @patch(f"{WB}.is_developer_mode", return_value=False)
+    @patch(f"{WB}.frappe")
+    def test_sandbox_mode_uses_sandbox_host(self, mock_frappe, _dev_mode):
+        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
+        self.assertEqual(wb.get_base_url(wb.EINVOICE), "https://apisandbox.whitebooks.in/einvoice")
+
+    @patch(f"{WB}.is_developer_mode", return_value=False)
+    @patch(f"{WB}.frappe")
     def test_production_mode_uses_production_host(self, mock_frappe, _dev_mode):
         mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
-        self.assertEqual(wb.get_base_url(wb.EWAY), "https://api.whitebooks.in/eway")
+        self.assertEqual(wb.get_base_url(wb.EWAY), "https://api.whitebooks.in/ewaybillapi/v1.03")
 
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.is_developer_mode", return_value=True)
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    @patch(f"{WB}.is_developer_mode", return_value=True)
+    @patch(f"{WB}.frappe")
     def test_developer_mode_forces_sandbox_for_document_families(self, mock_frappe, _dev_mode):
         mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
         self.assertEqual(wb.get_base_url(wb.EINVOICE), "https://apisandbox.whitebooks.in/einvoice")
-        self.assertEqual(wb.get_base_url(wb.EWAY), "https://apisandbox.whitebooks.in/eway")
+        self.assertEqual(wb.get_base_url(wb.EWAY), "https://apisandbox.whitebooks.in/ewaybillapi/v1.03")
 
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.is_developer_mode", return_value=True)
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    @patch(f"{WB}.is_developer_mode", return_value=True)
+    @patch(f"{WB}.frappe")
     def test_developer_mode_leaves_public_gst_on_the_checkbox(self, mock_frappe, _dev_mode):
         """Public GST is read-only lookups, so developer_mode does not force it."""
         mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
         self.assertEqual(wb.get_base_url(wb.PUBLIC_GST), "https://api.whitebooks.in")
 
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_public_gst_has_no_family_path_prefix(self, mock_frappe):
-        """Confirmed 2026-08-22 via WhiteBooks' GST-API Postman collection:
-        PUBLIC_GST paths (/public/search etc.) are rooted, not under /gst -
-        the earlier /oauth/token 404 traced back to this being wrong."""
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
-        self.assertEqual(wb.get_base_url(wb.PUBLIC_GST), "https://apisandbox.whitebooks.in")
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_each_family_has_a_distinct_path(self, mock_frappe):
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
-        urls = {api: wb.get_base_url(api) for api in wb.API_FAMILIES}
-        self.assertEqual(len(set(urls.values())), len(wb.API_FAMILIES))
-
-    def test_unknown_api_family_raises(self):
-        with patch(
-            "rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe"
-        ) as mock_frappe:
-            mock_frappe.throw.side_effect = frappe_throw_side_effect
-            with self.assertRaises(RuntimeError):
-                wb.get_base_url("not-a-real-family")
-
-
-class TestDeveloperModeCredentials(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.is_developer_mode", return_value=True)
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_developer_mode_uses_sandbox_token_host_and_credentials(
-        self, mock_frappe, mock_requests, _dev_mode
-    ):
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
-        mock_frappe.cache.return_value.get_value.return_value = None
-        mock_requests.post.return_value = _fake_response(
-            200, {"access_token": "tok", "token_type": "Bearer", "expires_in": 3600}
-        )
-
-        wb.get_token(wb.EINVOICE)
-
-        self.assertEqual(mock_requests.post.call_args.args[0], "https://apisandbox.whitebooks.in/oauth/token")
-        self.assertEqual(mock_requests.post.call_args.kwargs["data"]["client_id"], "einv-sandbox-id")
+    @patch(f"{WB}.frappe")
+    def test_unknown_api_family_raises(self, mock_frappe):
+        mock_frappe.throw.side_effect = _raise
+        with self.assertRaises(RuntimeError):
+            wb.get_base_url("not-a-real-family")
 
 
 class TestUseGstSandbox(unittest.TestCase):
-    """common.use_gst_sandbox(): the rule for the Charteredinfo paths."""
-
     @patch("rohit_common.rohit_common.india_gst_api.common.frappe")
     def test_developer_mode_in_site_config_forces_sandbox(self, mock_frappe):
         mock_frappe.conf = {"developer_mode": 1}
@@ -138,286 +124,170 @@ class TestUseGstSandbox(unittest.TestCase):
         self.assertFalse(common.use_gst_sandbox(SimpleNamespace(sandbox_mode=0)))
         self.assertTrue(common.use_gst_sandbox(SimpleNamespace(sandbox_mode=1)))
 
-    @patch("rohit_common.rohit_common.india_gst_api.common.frappe")
-    def test_charteredinfo_base_url_follows_developer_mode(self, mock_frappe):
-        mock_frappe.conf = {"developer_mode": 1}
-        mock_frappe.get_doc.return_value = SimpleNamespace(
-            sandbox_mode=0, api_link="https://prod", sandbox_api_link="http://sandbox"
-        )
-        self.assertEqual(common.get_base_url(), ("http://sandbox", 1))
 
-
-class TestGetToken(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_fetches_and_caches_new_token_when_none_cached(self, mock_frappe, mock_requests):
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
-        mock_frappe.cache.return_value.get_value.return_value = None
-        mock_requests.post.return_value = _fake_response(
-            200, {"access_token": "tok123", "token_type": "Bearer", "expires_in": 3600}
-        )
-
-        token = wb.get_token(wb.EINVOICE)
-
-        self.assertEqual(token["access_token"], "tok123")
-        mock_frappe.cache.return_value.set_value.assert_called_once()
-        set_call = mock_frappe.cache.return_value.set_value.call_args
-        self.assertEqual(set_call.args[0], "whitebooks_gsp_access_token_einvoice")
-        self.assertEqual(set_call.kwargs["expires_in_sec"], 3600 - 30)
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_returns_cached_token_without_a_new_request(self, mock_frappe, mock_requests):
-        mock_frappe.cache.return_value.get_value.return_value = {
-            "access_token": "cached-tok",
-            "token_type": "Bearer",
-            "fetched_at": "2026-08-22T00:00:00",
-            "expires_in": 3600,
-        }
-
-        token = wb.get_token(wb.EINVOICE)
-
-        self.assertEqual(token["access_token"], "cached-tok")
-        mock_requests.post.assert_not_called()
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_different_families_use_different_cache_keys(self, mock_frappe, mock_requests):
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
-        mock_frappe.cache.return_value.get_value.return_value = None
-        mock_requests.post.return_value = _fake_response(
-            200, {"access_token": "tok", "token_type": "Bearer", "expires_in": 3600}
-        )
-
-        wb.get_token(wb.EINVOICE)
-        wb.get_token(wb.EWAY)
-
-        cache_keys = {
-            call.args[0] for call in mock_frappe.cache.return_value.get_value.call_args_list
-        }
-        self.assertEqual(
-            cache_keys,
-            {"whitebooks_gsp_access_token_einvoice", "whitebooks_gsp_access_token_eway"},
-        )
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_force_refresh_ignores_cache(self, mock_frappe, mock_requests):
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
-        mock_frappe.cache.return_value.get_value.return_value = {
-            "access_token": "stale-tok",
-            "token_type": "Bearer",
-            "fetched_at": "2026-08-22T00:00:00",
-            "expires_in": 3600,
-        }
-        mock_requests.post.return_value = _fake_response(
-            200, {"access_token": "fresh-tok", "token_type": "Bearer", "expires_in": 3600}
-        )
-
-        token = wb.get_token(wb.EINVOICE, force_refresh=True)
-
-        self.assertEqual(token["access_token"], "fresh-tok")
-        mock_requests.post.assert_called_once()
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_sandbox_mode_uses_sandbox_credentials_for_that_family(self, mock_frappe, mock_requests):
-        settings = _fake_settings(sandbox_mode=1)
-        mock_frappe.get_single.return_value = settings
-        mock_frappe.cache.return_value.get_value.return_value = None
-        mock_requests.post.return_value = _fake_response(
-            200, {"access_token": "tok", "token_type": "Bearer", "expires_in": 3600}
-        )
-
-        wb.get_token(wb.EWAY)
-
-        called_body = mock_requests.post.call_args.kwargs["data"]
-        self.assertEqual(called_body["client_id"], "eway-sandbox-id")
-        self.assertEqual(
-            called_body["client_secret"], "secret-for-whitebooks_eway_sandbox_client_secret"
-        )
-        self.assertEqual(called_body["grant_type"], "client_credentials")
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_production_mode_uses_production_credentials_for_that_family(
-        self, mock_frappe, mock_requests
-    ):
-        settings = _fake_settings(sandbox_mode=0)
-        mock_frappe.get_single.return_value = settings
-        mock_frappe.cache.return_value.get_value.return_value = None
-        mock_requests.post.return_value = _fake_response(
-            200, {"access_token": "tok", "token_type": "Bearer", "expires_in": 3600}
-        )
-
-        wb.get_token(wb.PUBLIC_GST)
-
-        called_body = mock_requests.post.call_args.kwargs["data"]
-        self.assertEqual(called_body["client_id"], "gst-prod-id")
-        self.assertEqual(
-            called_body["client_secret"], "secret-for-whitebooks_gst_client_secret"
-        )
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_missing_credentials_raises(self, mock_frappe, mock_requests):
-        settings = _fake_settings(sandbox_mode=1, whitebooks_einv_sandbox_client_id=None)
-        mock_frappe.get_single.return_value = settings
-        mock_frappe.cache.return_value.get_value.return_value = None
-        mock_frappe.throw.side_effect = frappe_throw_side_effect
-
-        with self.assertRaises(RuntimeError):
-            wb.get_token(wb.EINVOICE)
-        mock_requests.post.assert_not_called()
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_missing_access_token_in_response_raises(self, mock_frappe, mock_requests):
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
-        mock_frappe.cache.return_value.get_value.return_value = None
-        mock_requests.post.return_value = _fake_response(200, {"error": "invalid_client"})
-        mock_frappe.throw.side_effect = frappe_throw_side_effect
-
-        with self.assertRaises(RuntimeError):
-            wb.get_token(wb.EINVOICE)
-
-    def test_unknown_api_family_raises(self):
-        with patch(
-            "rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe"
-        ) as mock_frappe:
-            mock_frappe.throw.side_effect = frappe_throw_side_effect
-            with self.assertRaises(RuntimeError):
-                wb.get_token("not-a-real-family")
-
-
-class TestGetHeaders(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_returns_bearer_authorization_header(self, mock_frappe, mock_requests):
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
-        mock_frappe.cache.return_value.get_value.return_value = {
-            "access_token": "abc123",
-            "token_type": "Bearer",
-            "fetched_at": "2026-08-22T00:00:00",
-            "expires_in": 3600,
-        }
-
-        headers = wb.get_headers(wb.EINVOICE)
-
-        self.assertEqual(headers["Authorization"], "Bearer abc123")
-        self.assertEqual(headers["Content-Type"], "application/json")
-
-    def test_unknown_api_family_raises(self):
-        with patch(
-            "rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe"
-        ) as mock_frappe:
-            mock_frappe.throw.side_effect = frappe_throw_side_effect
-            with self.assertRaises(RuntimeError):
-                wb.get_headers("not-a-real-family")
-
-
-class TestGetStaticClientHeaders(unittest.TestCase):
-    """PUBLIC_GST (confirmed 2026-08-22 via WhiteBooks' GST-API Postman
-    collection) sends client_id/client_secret as headers directly - no
-    OAuth2 token endpoint exists for this family."""
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+class TestStaticHeadersAndEmail(unittest.TestCase):
+    @patch(f"{WB}.frappe")
     def test_returns_client_id_and_secret_as_headers(self, mock_frappe):
         mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=1)
-
-        headers = wb.get_static_client_headers(wb.PUBLIC_GST)
-
-        self.assertEqual(headers, {
+        self.assertEqual(wb.get_static_client_headers(wb.PUBLIC_GST), {
             "client_id": "gst-sandbox-id",
             "client_secret": "secret-for-whitebooks_gst_sandbox_client_secret",
         })
 
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_uses_production_credentials_when_not_sandbox(self, mock_frappe):
-        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
+    @patch(f"{WB}.frappe")
+    def test_one_registered_email_for_every_family(self, mock_frappe):
+        mock_frappe.get_single.return_value = _fake_settings()
+        self.assertEqual({wb.get_registered_email(api) for api in wb.API_FAMILIES}, {"gsp@rigpl.com"})
 
-        headers = wb.get_static_client_headers(wb.PUBLIC_GST)
-
-        self.assertEqual(headers["client_id"], "gst-prod-id")
-
-
-class TestGetRegisteredEmail(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_returns_configured_email(self, mock_frappe):
-        mock_frappe.get_single.return_value = _fake_settings(
-            whitebooks_gst_email="gsp@rigpl.com"
-        )
-
-        self.assertEqual(wb.get_registered_email(wb.PUBLIC_GST), "gsp@rigpl.com")
-
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    @patch(f"{WB}.frappe")
     def test_throws_when_email_not_configured(self, mock_frappe):
         mock_frappe.get_single.return_value = _fake_settings(whitebooks_gst_email=None)
-        mock_frappe.throw.side_effect = frappe_throw_side_effect
-
+        mock_frappe.throw.side_effect = _raise
         with self.assertRaises(RuntimeError):
-            wb.get_registered_email(wb.PUBLIC_GST)
+            wb.get_registered_email(wb.EINVOICE)
 
 
-class TestRefreshSession(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_deletes_cached_token_for_that_family(self, mock_frappe):
-        wb.refresh_session(wb.EINVOICE)
-        mock_frappe.cache.return_value.delete_value.assert_called_once_with(
-            "whitebooks_gsp_access_token_einvoice"
-        )
+class TestEnvelope(unittest.TestCase):
+    def test_success_spellings(self):
+        for status in ("1", 1, "Sucess", "Success"):
+            self.assertTrue(wb.is_success({"status_cd": status}), status)
+        self.assertFalse(wb.is_success({"status_cd": "0"}))
 
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_requires_api_name(self, mock_frappe):
-        mock_frappe.throw.side_effect = frappe_throw_side_effect
-        with self.assertRaises(RuntimeError):
-            wb.refresh_session()
+    def test_einvoice_codes_in_status_desc(self):
+        resp = {"status_cd": "0", "status_desc": '[{"ErrorCode":"2150","ErrorMessage":"Duplicate IRN"}]'}
+        self.assertEqual(wb.error_codes(resp), ["2150"])
+
+    def test_eway_codes_in_error_message(self):
+        resp = {"status_cd": "0", "error": {"message": '{"errorCodes":"238,"}'}}
+        self.assertEqual(wb.error_codes(resp), ["238"])
+
+    def test_gst_returns_error_code(self):
+        resp = {"status_cd": "0", "error": {"errorCode": "RET11416", "errorMessage": "No data"}}
+        self.assertEqual(wb.error_codes(resp), ["RET11416"])
+
+    def test_unwrap_parses_json_text_data(self):
+        self.assertEqual(wb.unwrap({"status_cd": "1", "data": '{"ewayBillNo": 101}'}, "x"),
+                         {"ewayBillNo": 101})
+
+    @patch(f"{WB}.frappe")
+    def test_unwrap_throws_with_the_codes(self, mock_frappe):
+        mock_frappe.throw.side_effect = _raise
+        with self.assertRaisesRegex(RuntimeError, "Invalid GSTIN"):
+            wb.unwrap({"status_cd": "0", "status_desc": "Invalid GSTIN"}, "IRN generation")
 
 
-class TestCallWithTokenRetry(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_succeeds_first_try_no_retry(self, mock_frappe):
-        request_fn = MagicMock(return_value=_fake_response(200, {"ok": True}))
+@patch(f"{WB}.is_developer_mode", return_value=False)
+@patch(f"{WB}.requests.request")
+@patch(f"{WB}.frappe")
+class TestEinvoiceRequest(unittest.TestCase):
+    AUTH = {"status_cd": "Sucess", "data": {"AuthToken": "tok-1", "TokenExpiry": None}}
 
-        response = wb.call_with_token_retry(request_fn, wb.EINVOICE)
+    def test_authenticates_then_sends_token_and_api_user(self, mock_frappe, mock_request, _dev):
+        cache = _mock_frappe(mock_frappe, _fake_settings(sandbox_mode=1))
+        mock_request.side_effect = [_reply(self.AUTH), _reply({"status_cd": "1", "data": {"Irn": "X"}})]
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(request_fn.call_count, 1)
-        mock_frappe.cache.return_value.delete_value.assert_not_called()
+        resp = wb.einvoice_request("POST", "GENERATE", body='{"Version": "1.1"}')
 
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_retries_once_on_401_then_succeeds(self, mock_frappe):
-        request_fn = MagicMock(
-            side_effect=[_fake_response(401), _fake_response(200, {"ok": True})]
-        )
+        self.assertEqual(resp["data"], {"Irn": "X"})
+        auth, call = mock_request.call_args_list
+        self.assertEqual(auth.args, ("GET", "https://apisandbox.whitebooks.in/einvoice/authenticate"))
+        self.assertEqual(auth.kwargs["headers"]["password"],
+                         "secret-for-whitebooks_sandbox_api_password")
+        self.assertEqual(call.args, ("POST", "https://apisandbox.whitebooks.in/einvoice/type/GENERATE/version/V1_03"))
+        headers = call.kwargs["headers"]
+        self.assertEqual((headers["auth-token"], headers["username"], headers["gstin"]),
+                         ("tok-1", "sandbox-api-user", "29AAGCB1286Q000"))
+        self.assertNotIn("password", headers)
+        self.assertEqual(call.kwargs["params"], {"email": "gsp@rigpl.com"})
+        self.assertEqual(call.kwargs["data"], '{"Version": "1.1"}')
+        self.assertIn("tok-1", cache.values.values())
 
-        response = wb.call_with_token_retry(request_fn, wb.EINVOICE)
+    def test_cached_token_is_reused(self, mock_frappe, mock_request, _dev):
+        _mock_frappe(mock_frappe, _fake_settings(sandbox_mode=1))
+        mock_request.side_effect = [_reply(self.AUTH), _reply({"status_cd": "1"}), _reply({"status_cd": "1"})]
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(request_fn.call_count, 2)
-        mock_frappe.cache.return_value.delete_value.assert_called_once_with(
-            "whitebooks_gsp_access_token_einvoice"
-        )
+        wb.einvoice_request("GET", "GETIRN", params={"param1": "a"})
+        wb.einvoice_request("GET", "GETIRN", params={"param1": "b"})
 
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_gives_up_after_one_retry_still_401(self, mock_frappe):
-        request_fn = MagicMock(return_value=_fake_response(401))
+        self.assertEqual(mock_request.call_count, 3)
 
-        response = wb.call_with_token_retry(request_fn, wb.EINVOICE)
+    def test_expired_token_authenticates_again_once(self, mock_frappe, mock_request, _dev):
+        _mock_frappe(mock_frappe, _fake_settings(sandbox_mode=1))
+        expired = {"status_cd": "0", "status_desc": '[{"ErrorCode":"1005","ErrorMessage":"Invalid Token"}]'}
+        fresh = {"status_cd": "Sucess", "data": {"AuthToken": "tok-2"}}
+        mock_request.side_effect = [_reply(self.AUTH), _reply(expired), _reply(fresh),
+                                    _reply({"status_cd": "1", "data": {"Irn": "X"}})]
 
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(request_fn.call_count, 2)
-        mock_frappe.cache.return_value.delete_value.assert_called_once()
+        resp = wb.einvoice_request("GET", "GETIRN", params={"param1": "a"})
 
-    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_non_401_failure_not_retried(self, mock_frappe):
-        request_fn = MagicMock(return_value=_fake_response(500))
+        self.assertEqual(resp["data"], {"Irn": "X"})
+        self.assertEqual(mock_request.call_args_list[-1].kwargs["headers"]["auth-token"], "tok-2")
 
-        response = wb.call_with_token_retry(request_fn, wb.EINVOICE)
+    def test_production_uses_the_production_api_user(self, mock_frappe, mock_request, _dev):
+        _mock_frappe(mock_frappe, _fake_settings(sandbox_mode=0))
+        mock_request.side_effect = [_reply(self.AUTH), _reply({"status_cd": "1"})]
 
-        self.assertEqual(response.status_code, 500)
-        self.assertEqual(request_fn.call_count, 1)
-        mock_frappe.cache.return_value.delete_value.assert_not_called()
+        wb.einvoice_request("GET", "GETIRN", params={"param1": "a"})
+
+        auth = mock_request.call_args_list[0]
+        self.assertEqual(auth.args[1], "https://api.whitebooks.in/einvoice/authenticate")
+        self.assertEqual((auth.kwargs["headers"]["username"], auth.kwargs["headers"]["gstin"]),
+                         ("prod-api-user", "06AAACR1567J1ZC"))
+        self.assertEqual(auth.kwargs["headers"]["password"], "secret-for-eway_bill_password")
+
+    def test_missing_api_user_throws_before_any_call(self, mock_frappe, mock_request, _dev):
+        _mock_frappe(mock_frappe, _fake_settings(sandbox_mode=1, whitebooks_sandbox_api_username=None))
+        with self.assertRaisesRegex(RuntimeError, "GST API Username"):
+            wb.einvoice_request("GET", "GETIRN")
+        mock_request.assert_not_called()
+
+
+@patch(f"{WB}.is_developer_mode", return_value=False)
+@patch(f"{WB}.requests.request")
+@patch(f"{WB}.frappe")
+class TestEwayRequest(unittest.TestCase):
+    def test_opens_session_once_and_sends_no_password_on_data_calls(self, mock_frappe, mock_request, _dev):
+        _mock_frappe(mock_frappe, _fake_settings(sandbox_mode=1))
+        mock_request.side_effect = [_reply({"status_cd": "1"}), _reply({"status_cd": "1", "data": "[]"}),
+                                    _reply({"status_cd": "1", "data": "[]"})]
+
+        wb.eway_request("GET", "getewaybillsbydate", params={"date": "01/10/2026"})
+        wb.eway_request("GET", "getewaybillsbydate", params={"date": "02/10/2026"})
+
+        auth, first, second = mock_request.call_args_list
+        self.assertEqual(auth.args[1], "https://apisandbox.whitebooks.in/ewaybillapi/v1.03/authenticate")
+        self.assertEqual(auth.kwargs["params"]["username"], "sandbox-api-user")
+        self.assertEqual(first.args[1],
+                         "https://apisandbox.whitebooks.in/ewaybillapi/v1.03/ewayapi/getewaybillsbydate")
+        self.assertEqual(first.kwargs["params"], {"date": "01/10/2026", "email": "gsp@rigpl.com"})
+        self.assertNotIn("password", first.kwargs["headers"])
+
+    def test_expired_session_opens_again_once(self, mock_frappe, mock_request, _dev):
+        _mock_frappe(mock_frappe, _fake_settings(sandbox_mode=1))
+        expired = {"status_cd": "0", "error": {"message": '{"errorCodes":"238"}'}}
+        mock_request.side_effect = [_reply({"status_cd": "1"}), _reply(expired), _reply({"status_cd": "1"}),
+                                    _reply({"status_cd": "1", "data": {"ewbNo": 1}})]
+
+        resp = wb.eway_request("GET", "getewaybill", params={"ewbNo": 1})
+
+        self.assertEqual(resp["data"], {"ewbNo": 1})
+        self.assertEqual(mock_request.call_count, 4)
+
+
+class TestSendHidesUrl(unittest.TestCase):
+    @patch(f"{WB}.requests.request")
+    @patch(f"{WB}.frappe")
+    def test_network_error_does_not_show_the_query_string(self, mock_frappe, mock_request):
+        mock_frappe.throw.side_effect = _raise
+        url = "https://api.whitebooks.in/ewaybillapi/v1.03/authenticate"
+        mock_request.side_effect = requests.ConnectionError(f"Max retries exceeded with url: {url}?password=SECRET")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            wb._send("GET", url, {}, {"password": "SECRET"})
+
+        self.assertIn("ConnectionError", str(ctx.exception))
+        self.assertNotIn("SECRET", str(ctx.exception))
+        self.assertIsNone(ctx.exception.__context__)
 
 
 if __name__ == "__main__":

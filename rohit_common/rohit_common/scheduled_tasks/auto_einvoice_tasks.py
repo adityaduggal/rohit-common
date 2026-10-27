@@ -8,13 +8,7 @@ import requests
 from frappe.utils import add_to_date, flt, getdate, now_datetime
 from frappe.utils.background_jobs import enqueue
 from rq.timeouts import JobTimeoutException
-from ..india_gst_api.common import use_gst_sandbox
-from ..india_gst_api.einv import (
-    einv_needed,
-    generate_irn,
-    generate_irn_whitebooks,
-    generate_irn_whitebooks_bulk,
-)
+from ..india_gst_api.einv import einv_needed, generate_irn
 from ...utils.background_doc_processing import enqueue_once, short_error, unmark_failed_doc
 
 SWEEP_TIMEOUT = 800
@@ -111,8 +105,8 @@ def make_einvoice_for_docs():
         except JobTimeoutException:
             raise
         except requests.RequestException as e:
-            # The Charteredinfo URL holds the ASP password, and the exception text holds the
-            # URL, so log only the exception type (#23).
+            # A request error's text can hold a URL with credentials, so log only its
+            # type (#23). whitebooks_provider already raises without the URL.
             frappe.db.rollback()
             frappe.log_error(f"Request to ASP failed: {type(e).__name__}", EINV_FAILURE_TITLE + einv.name)
         except Exception as e:
@@ -129,43 +123,28 @@ def _recent_einvoice_failures():
     return list({title[len(EINV_FAILURE_TITLE):] for title in titles})
 
 
-def make_eway_bill_for_docs():
-    """
-    If eway is needed for a doc then eway bill is made based on IRN generated
-    """
-    pass
-
-
 # ---------------------------------------------------------------------------
-# WhiteBooks.in live path (T10, docs/designs/gst-asp-migration-whitebooks.md)
-#
-# NOT YET LIVE — generate_irn_whitebooks() (T3) is unverified against a real
-# WhiteBooks sandbox response. This on_submit hook is wired in hooks.py, so
-# it WILL fire once merged, but generate_irn_whitebooks() itself still needs
-# The Assignment's sandbox handshake before this path can be trusted with
-# real invoices. Until then, treat any failures here as expected.
-#
-# This is a genuinely new codepath, not a tweak to an existing one — before
-# T10, no on_submit hook triggered e-invoice generation at all; the only
-# existing mechanism was make_einvoice_for_docs()'s 15-minute cron sweep.
+# Live path: each Sales Invoice is sent to WhiteBooks right after submit. An
+# invoice the live job misses (WhiteBooks down, validation error) still has no
+# IRN, so the 15-min sweep above retries it.
 # ---------------------------------------------------------------------------
 
 LIVE_EINVOICE_QUEUE = "short"
+# The sweep leaves invoices this new to the live job, so both do not send the same
+# invoice at once. If they still do, the second gets a duplicate IRN reply, and
+# generate_irn() saves the existing IRN.
+LIVE_JOB_GRACE_MINS = 10
 
 
 def queue_live_einvoice_submission(doc, method=None):
     """
-    on_submit hook for Sales Invoice (see hooks.py). Enqueues the live-path
-    WhiteBooks e-invoice submission on a dedicated short queue, immediately
-    at submit time — not called inline, so the user's submit request isn't
-    blocked on an external API call (same principle
-    rohit_common.rohit_common.validations.sales_invoice.on_submit already
-    follows for large invoices via doc.queue_action()).
+    on_submit hook for Sales Invoice (see hooks.py). Enqueues the IRN on the
+    short queue, so the user's submit request does not wait for the GST system.
     """
     if not _live_einvoice_applicable(doc):
         return
     enqueue(
-        submit_live_einvoice_whitebooks,
+        submit_live_einvoice,
         queue=LIVE_EINVOICE_QUEUE,
         timeout=60,
         dtype=doc.doctype,
@@ -186,116 +165,35 @@ def _live_einvoice_applicable(doc):
     return einv_needed(doc.doctype, doc.name) == 1
 
 
-def submit_live_einvoice_whitebooks(dtype, dname):
+def submit_live_einvoice(dtype, dname):
     """
-    The live-path job body. Synchronous WhiteBooks call within this one
-    background job — no E-Invoice Submission Log entry, no webhook: the
-    single-invoice generate call returns the IRN in the same response (see
-    Approach C's synchronous-live-path revision), so there's no async gap
-    to correlate. A failure here is caught, logged, and re-raised so
-    Frappe's own background-job failure tracking (RQ) sees it as failed —
-    this invoice then falls through to the backlog sweep (T11) on its next
-    15-minute run, since it will still be missing an IRN.
+    The live-path job body. A failure is logged with the same title the sweep
+    uses, so the sweep backs off this invoice for EINV_RETRY_AFTER_HOURS, and is
+    re-raised so RQ marks the job failed.
     """
     try:
-        generate_irn_whitebooks(dtype, dname)
+        generate_irn(dtype, dname)
     except Exception as e:
-        frappe.log_error(
-            title="WhiteBooks live e-invoice submission failed",
-            message=f"{dtype} {dname}: {e}",
-        )
+        frappe.db.rollback()
+        frappe.log_error(f"{short_error(e)}\n\n{frappe.get_traceback()}", EINV_FAILURE_TITLE + dname)
+        frappe.db.commit()
         raise
 
 
-# ---------------------------------------------------------------------------
-# WhiteBooks.in backlog path (T11, docs/designs/gst-asp-migration-whitebooks.md)
-#
-# NOT YET WIRED into scheduler_events — make_einvoice_for_docs() above
-# remains the live 15-minute sweep (Charteredinfo, one invoice at a time)
-# until this bulk path is sandbox-verified and the actual cutover happens.
-# make_einvoice_for_docs_whitebooks_bulk() below is the intended eventual
-# replacement, callable manually for testing in the meantime.
-# ---------------------------------------------------------------------------
-
-
 def _find_pending_einvoice_docs(einv_date, exclude=None, limit=None):
-    """Submitted Sales Invoices still missing an IRN, newest first. Shared by the live
-    sweep and the backlog bulk path, so both paths agree on eligibility.
+    """Submitted Sales Invoices still missing an IRN, newest first, that the live
+    job had time to handle.
 
     Unregistered (B2C) invoices never get an IRN, so they are filtered here in SQL and
     not by einv_needed() per row. IFNULL keeps einv_needed()'s rule that a blank
     gst_category still needs an eInvoice."""
-    values = {"einv_date": einv_date, "exclude": tuple(exclude or ()), "limit": limit}
+    values = {"einv_date": einv_date, "exclude": tuple(exclude or ()), "limit": limit,
+              "settled": add_to_date(now_datetime(), minutes=-LIVE_JOB_GRACE_MINS)}
     query = """SELECT name, posting_date FROM `tabSales Invoice` WHERE docstatus = 1 AND
         (irn IS NULL OR ack_no IS NULL OR ack_date IS NULL) AND
-        IFNULL(gst_category, '') != 'Unregistered' AND
+        IFNULL(gst_category, '') != 'Unregistered' AND modified < %(settled)s AND
         posting_date >= %(einv_date)s{name_filter} ORDER BY posting_date DESC, name DESC{limit}"""
     return frappe.db.sql(query.format(
         name_filter=" AND name NOT IN %(exclude)s" if exclude else "",
         limit=" LIMIT %(limit)s" if limit else "",
     ), values, as_dict=1)
-
-
-def _current_environment():
-    rset = frappe.get_single("Rohit Settings")
-    return "Sandbox" if use_gst_sandbox(rset) else "Production"
-
-
-def make_einvoice_for_docs_whitebooks_bulk():
-    """
-    Backlog/recovery path body. Finds every submitted Sales Invoice still
-    missing an IRN (same candidate set as the live sweep — once the live
-    path (T10) is cut over, this should normally be near-empty; non-empty
-    means the live path failed or WhiteBooks was down for those invoices)
-    and submits them together via generate_irn_whitebooks_bulk() (T11).
-
-    Creates one E-Invoice Submission Log entry per invoice: `Failed` with
-    the error recorded immediately for invoices the bulk ACK rejected
-    synchronously (partial-batch-failure case — NOT all-or-nothing),
-    `Submitted` for invoices accepted for async processing, awaiting the
-    webhook (T9) to resolve them to Success/Failed later.
-
-    Returns {"submitted": N, "rejected": M} — 0/0 if e-invoicing is
-    disabled or there's nothing pending.
-    """
-    einv_app = flt(frappe.get_value("Rohit Settings", "Rohit Settings", "enable_einvoice"))
-    if einv_app != 1:
-        return {"submitted": 0, "rejected": 0}
-
-    einv_date = frappe.get_value("Rohit Settings", "Rohit Settings", "einvoice_applicable_date")
-    einv_docs = _find_pending_einvoice_docs(einv_date)
-    dnames = [d.name for d in einv_docs if einv_needed("Sales Invoice", d.name) == 1]
-    if not dnames:
-        return {"submitted": 0, "rejected": 0}
-
-    submission_ids, immediate_rejections = generate_irn_whitebooks_bulk("Sales Invoice", dnames)
-    environment = _current_environment()
-    submitted = 0
-    rejected = 0
-    for dname in dnames:
-        error = immediate_rejections.get(dname)
-        is_rejected = dname in immediate_rejections
-        log = frappe.get_doc(
-            {
-                "doctype": "E-Invoice Submission Log",
-                "reference_doctype": "Sales Invoice",
-                "reference_name": dname,
-                "submission_path": "Backlog",
-                "environment": environment,
-                "status": "Failed" if is_rejected else "Submitted",
-                "submission_id": submission_ids[dname],
-                "error_message": error,
-                "submitted_on": frappe.utils.now_datetime(),
-            }
-        )
-        log.insert(ignore_permissions=True)
-        if is_rejected:
-            rejected += 1
-            frappe.log_error(
-                title="WhiteBooks backlog e-invoice rejected",
-                message=f"{dname}: {error}",
-            )
-        else:
-            submitted += 1
-    frappe.db.commit()
-    return {"submitted": submitted, "rejected": rejected}

@@ -91,18 +91,14 @@ class TestSearchGstinWhitebooks(unittest.TestCase):
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.whitebooks_provider")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.requests")
     @patch("rohit_common.rohit_common.india_gst_api.gst_public_api.frappe")
-    def test_does_not_use_oauth2_token_machinery(self, mock_frappe, mock_requests, mock_wb):
-        """PUBLIC_GST has no token endpoint - confirms this call path never
-        touches get_headers()/get_token()/call_with_token_retry()."""
+    def test_sends_the_public_gst_client_pair(self, mock_frappe, mock_requests, mock_wb):
+        """PUBLIC_GST has no authenticate step: the client pair goes on every call."""
         mock_frappe.get_single.return_value = SimpleNamespace(gstin="06AAACR1567J1ZC")
         _configure_wb(mock_wb)
         mock_requests.get.return_value = _fake_response(200, {})
 
         gst_public_api.search_gstin_whitebooks("27AAACT2727Q1ZW")
 
-        mock_wb.get_headers.assert_not_called()
-        mock_wb.get_token.assert_not_called()
-        mock_wb.call_with_token_retry.assert_not_called()
         mock_wb.get_static_client_headers.assert_called_once_with("gst")
 
 

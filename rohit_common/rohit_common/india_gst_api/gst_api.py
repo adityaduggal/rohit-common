@@ -25,7 +25,7 @@ the first sandbox call, then remove this note):
 3. "No data for this section/period" comes back as status_cd "0" with one of
    NO_DATA_ERROR_CODES. CONFIRMED 2026-10-27 for RET11416 on a production GSTR1 b2cl
    call: {"status_cd": "0", "error": {"errorCode": ..., "errorMessage": ...}}.
-   See _error_code().
+   See whitebooks_provider.error_codes().
 Every failure message includes the raw response, so a wrong guess shows its real
 shape on the first live call.
 """
@@ -84,8 +84,8 @@ def get_gstr2b(gstin: str, ret_period: str) -> dict:
 
 def _gstr2b_payload(resp, context):
     """The GSTN GSTR2B payload. WhiteBooks wraps GSTN's own {"data": {...}} in its "data" key."""
-    if not _is_success(resp):
-        frappe.throw(f"{context} failed: {_describe(resp)}", title="WhiteBooks GSTR2B Error")
+    if not whitebooks_provider.is_success(resp):
+        frappe.throw(f"{context} failed: {whitebooks_provider.describe(resp)}", title="WhiteBooks GSTR2B Error")
     payload = resp.get("data")
     while isinstance(payload, dict) and "gendt" not in payload and "fc" not in payload \
             and isinstance(payload.get("data"), dict):
@@ -113,8 +113,8 @@ def get_gst_otp(gstin):
     gstin = _require_str("GSTIN", gstin)
     reg = get_registration(gstin)
     resp = _get(_session(reg, with_txn=False), "/authentication/otprequest", {})
-    if not _is_success(resp):
-        frappe.throw(f"OTP request for GSTIN {gstin} failed: {_describe(resp)}",
+    if not whitebooks_provider.is_success(resp):
+        frappe.throw(f"OTP request for GSTIN {gstin} failed: {whitebooks_provider.describe(resp)}",
                      title="WhiteBooks OTP Request Failed")
     txn = _extract_txn(resp)
     if not txn:
@@ -142,8 +142,8 @@ def authenticate_gst_otp(gstin, otp, row_id):
         frappe.throw(f"No OTP was requested for GSTIN {gstin}. Click Request OTP first.",
                      title="OTP Not Requested")
     resp = _get(_session(reg), "/authentication/authtoken", {"otp": otp})
-    if not _is_success(resp):
-        frappe.throw(f"OTP validation for GSTIN {gstin} failed: {_describe(resp)}",
+    if not whitebooks_provider.is_success(resp):
+        frappe.throw(f"OTP validation for GSTIN {gstin} failed: {whitebooks_provider.describe(resp)}",
                      title="WhiteBooks OTP Validation Failed")
     now = now_datetime()
     frappe.db.set_value(REGISTRATION_DOCTYPE, reg.name, {
@@ -173,16 +173,16 @@ def check_for_refresh_token(row):
     if now < refresh_after:
         return
     resp = _get(_session(row), "/authentication/refreshtoken", {})
-    if _is_success(resp):
+    if whitebooks_provider.is_success(resp):
         frappe.db.set_value(REGISTRATION_DOCTYPE, row.name, {
             "validity_of_token": now + datetime.timedelta(minutes=TOKEN_VALIDITY_MINS),
             "authorization_token": _extract_auth_token(resp) or row.authorization_token,
             "no_of_times_token_updated": cint(row.no_of_times_token_updated) + 1,
         })
         return
-    if _error_code(resp) in REVOKE_ACCESS_ERROR_CODES:
+    if set(whitebooks_provider.error_codes(resp)) & REVOKE_ACCESS_ERROR_CODES:
         frappe.db.set_value(REGISTRATION_DOCTYPE, row.name, {"api_access_authorized": 0, "otp": ""})
-    frappe.log_error(f"GSTIN {row.gst_registration_number}: {_describe(resp)}",
+    frappe.log_error(f"GSTIN {row.gst_registration_number}: {whitebooks_provider.describe(resp)}",
                      "WhiteBooks GST Token Refresh Failed")
 
 
@@ -266,7 +266,7 @@ def _session(reg, with_txn=True):
     """Everything a call for this GSTIN needs, built once per batch of calls."""
     ip_address = frappe.db.get_single_value("Rohit Settings", "whitebooks_gst_ip_address", cache=False)
     if not ip_address:
-        frappe.throw("Set GST Returns API Server IP Address in Rohit Settings (WhiteBooks section)",
+        frappe.throw("Set WhiteBooks Server IP Address in Rohit Settings (WhiteBooks section)",
                      title="WhiteBooks IP Address Missing")
     headers = whitebooks_provider.get_static_client_headers(API_NAME)
     headers.update({
@@ -297,24 +297,6 @@ def _get(session, path, params):
     return response.json()
 
 
-def _is_success(resp):
-    return str(resp.get("status_cd")) == "1"
-
-
-def _error_code(resp):
-    # GSTN uses error_cd; WhiteBooks replies use errorCode.
-    error = resp.get("error")
-    if isinstance(error, dict):
-        return error.get("errorCode") or error.get("error_cd")
-    return resp.get("errorCode") or resp.get("error_cd")
-
-
-def _describe(resp):
-    error = resp.get("error")
-    message = error.get("errorMessage") or error.get("message") if isinstance(error, dict) else error
-    return f"{resp.get('status_desc') or message or ''} (raw response: {resp})"
-
-
 def _extract_txn(resp):
     # UNVERIFIED (1)
     header = resp.get("header")
@@ -336,14 +318,14 @@ def _extract_auth_token(resp):
 
 
 def _unwrap(resp, response_key, context):
-    if _is_success(resp):
+    if whitebooks_provider.is_success(resp):
         # UNVERIFIED (2)
         data = resp.get("data")
         payload = data if isinstance(data, dict) else resp
         return payload.get(response_key) or []
-    if _error_code(resp) in NO_DATA_ERROR_CODES:
+    if set(whitebooks_provider.error_codes(resp)) & NO_DATA_ERROR_CODES:
         return []
-    frappe.throw(f"{context} failed: {_describe(resp)}", title="WhiteBooks GST Returns API Error")
+    frappe.throw(f"{context} failed: {whitebooks_provider.describe(resp)}", title="WhiteBooks GST Returns API Error")
 
 
 def _require_str(label, value):

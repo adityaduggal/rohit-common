@@ -5,91 +5,57 @@
 from __future__ import unicode_literals
 import frappe
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from frappe.model.document import Document
 from frappe.desk.reportview import get_match_cond, get_filters_cond
-from frappe.utils import flt
-from ...india_gst_api.eway_bill_api import *
-from ...india_gst_api.common import use_gst_sandbox
+from frappe.utils import flt, get_datetime
+from ...india_gst_api.eway_bill_api import create_ewb_from_json, update_partb_ewb, \
+    get_eway_bill_details, ewb_from_ewb_detail, get_transporter_id, get_supply_type, \
+    get_supply_sub_type, get_doctype, get_docno, get_from_address_doc, get_value_of_tax, \
+    get_doc_date, get_trans_type, get_items_table, get_taxes_type
+from ...india_gst_api.eway_bill_api import cancel_ewb as cancel_ewb_on_portal
+from ...india_gst_api.common import use_gst_sandbox, get_default_gstin
 from ...validations.sales_invoice import get_item_synopsis
 from ...validations.google_maps import get_distance_matrix, get_approx_dist_frm_matrix
+EWB_DATE_FORMAT = '%d/%m/%Y %I:%M:%S %p'
 
 
 class eWayBill(Document):
+    @frappe.whitelist()
     def create_ewb(self):
         """
-        Creates an Eway Bill for an Eway Bill Doc
+        Creates an Eway Bill for an Eway Bill Doc. If the document already has one,
+        create_ewb_from_json() returns that one.
         """
         if not self.json_reply and not self.eway_bill_no:
             ewb_json = self.get_ewb_json(self.document_type, self.document_number)
-            frappe.msgprint(str(ewb_json))
             json_reply = create_ewb_from_json(ewb_json)
-            frappe.msgprint(str(json_reply))
-            if json_reply:
-                if json_reply.get('status_cd', 1) == 1:
-                    self.json_reply = str(json_reply)
-                    self.eway_bill_no = json_reply.get('ewayBillNo')
-                    self.eway_bill_date = datetime.strptime(json_reply.get('ewayBillDate'), '%d/%m/%Y %I:%M:%S %p')
-                    return json_reply.get('ewayBillNo')
-                else:
-                    frappe.msgprint("Got Error")
-                    error = json_reply.get('error')
-                    if error.get('error_cd') == '604,':
-                        # Search for eWay Bill by Doctype and Document Number and get details for the same.
-                        res_json = get_ewb_by_dt_dn(dt=self.ewb_document_type, dn=self.document_number)
-                        self.eway_bill_no = res_json.get('ewayBillNo')
-                        self.eway_bill_date = datetime.strptime(res_json.get('ewayBillDate'), '%d/%m/%Y %I:%M:%S %p')
-                        self.save()
-                        self.reload()
+            self.db_set("json_reply", json.dumps(json_reply))
+            self.db_set("eway_bill_no", json_reply.get('ewayBillNo') or json_reply.get('ewbNo'))
+            self.db_set("eway_bill_date", datetime.strptime(
+                json_reply.get('ewayBillDate') or json_reply.get('ewbDate'), EWB_DATE_FORMAT))
+            if json_reply.get('validUpto'):
+                self.db_set("valid_upto", datetime.strptime(json_reply.get('validUpto'), EWB_DATE_FORMAT))
+            return self.eway_bill_no
         else:
             frappe.throw(f"eWay Bill Already Generated for {self.name}")
 
+    @frappe.whitelist()
     def update_ewb_partb(self):
         if not self.valid_upto:
             # Update Part-B
             res_json = update_partb_ewb(self)
-            self.valid_upto = datetime.strptime(res_json.get('validUpto'), '%d/%m/%Y %I:%M:%S %p')
-            self.save()
-            self.reload()
+            self.db_set("valid_upto", datetime.strptime(res_json.get('validUpto'), EWB_DATE_FORMAT))
 
-    def get_eway_bill_print(self):
-        """
-        Gets Detailed print for an eWay Bill Doctype if needed
-        """
-        if self.eway_bill_no:
-            if self.valid_upto:
-                query = f"""SELECT name FROM `tabFile`
-                WHERE file_name LIKE '{self.eway_bill_no}.pdf' AND
-                attached_to_doctype = '{self.doctype}' AND attached_to_name = '{self.name}'"""
-                file_list = frappe.db.sql(query, as_list=1)
-                if not file_list:
-                    if self.json_reply:
-                        json_data = json.loads((self.json_reply).replace("'", '"'))
-                        get_ewb_detailed_print(ewbdoc=self, json_data=json_data)
-                        self.reload()
-                    else:
-                        res_json = get_eway_bill_details(self.eway_bill_no)
-                        get_ewb_detailed_print(ewbdoc=self, json_data=res_json)
-                else:
-                    frappe.throw(f"eWay Bill print already attached for \
-                        {frappe.get_desk_link(self.doctype, self.name)}")
-            else:
-                frappe.throw(f"{frappe.get_desk_link(self.doctype,self.name)} is Not Valid Update \
-                    Part-B First")
-        else:
-            frappe.throw(f"eWay Bill No not generated for \
-                {frappe.get_desk_link(self.doctype,self.name)}")
-
-
+    @frappe.whitelist()
     def get_eway_bill(self):
         """
         Gets the EWay Bill Details for a eWay Bill No
         """
         if self.eway_bill_no:
             json_reply = get_eway_bill_details(self.eway_bill_no)
-            self.json_reply = str(json_reply)
+            self.db_set("json_reply", json.dumps(json_reply))
             ewb_from_ewb_detail(json_reply)
-            self.get_eway_bill_print()
         else:
             frappe.throw(f"No eWay Bill number mentioned for \
                 {frappe.get_desk_link('eWay Bill', self.name)}")
@@ -221,7 +187,7 @@ class eWayBill(Document):
 
     def update_from_add_doc(self, add_doc, text):
         if use_gst_sandbox():
-            setattr(self, 'generated_by', '05AAACG1539P1ZH')
+            setattr(self, 'generated_by', get_default_gstin(sbox=1))
             if text == 'to' and self.supply_type == 'Inward':
                 self.update_sandbox_details(text)
             elif text == 'from' and self.supply_type == 'Outward':
@@ -249,11 +215,13 @@ class eWayBill(Document):
             setattr(self, text + '_gstin', 'URP')
 
     def update_sandbox_details(self, text):
+        # The sandbox only accepts the WhiteBooks sandbox GSTIN as the generator.
+        # The pincode must be in that GSTIN's state; set it on the eWay Bill if needed.
         if text == 'from':
-            setattr(self, text + 'generated_by', '05AAACG1539P1ZH')
-            setattr(self, text + '_gstin', '05AAACG1539P1ZH')
-            setattr(self, text + '_state_code', 5)
-            setattr(self, text + '_pincode', 263652)
+            sandbox_gstin = get_default_gstin(sbox=1)
+            setattr(self, 'generated_by', sandbox_gstin)
+            setattr(self, text + '_gstin', sandbox_gstin)
+            setattr(self, text + '_state_code', int(sandbox_gstin[:2]))
         elif text == 'to':
             setattr(self, text + '_gstin', '02EHFPS5910D2Z0')
             setattr(self, text + '_state_code', 2)
@@ -351,6 +319,7 @@ class eWayBill(Document):
     def get_approx_dist_ewb(self, dist):
         return ((int(dist / 100) + 1) * 100) - 1
 
+    @frappe.whitelist()
     def extend_eway_validity(self):
         # eWay bill validity can only be extended by Transporter or if No Transporter is defined then by Generator
         # eWay bill validity can only be extended 8 hrs before or after expiry of eWay Bill
@@ -359,23 +328,32 @@ class eWayBill(Document):
             upper_limit = valid_upto + timedelta(hours=8)
             lower_limit = valid_upto - timedelta(hours=8)
             if lower_limit < datetime.now() < upper_limit:
-                frappe.msgprint('Can Extend Validity')
+                # The extension needs the vehicle's current place, pincode and remaining
+                # distance, which this form does not hold yet.
+                frappe.msgprint(f"Extend {self.eway_bill_no} on the e-Way Bill portal, then use "
+                                "Get eWay Bill Details to update this form.")
             else:
                 frappe.throw('Validity of {} can only be Extended Between {} and {}'.
                                          format(frappe.get_desk_link(self.doctype, self.name), lower_limit, upper_limit))
 
+    @frappe.whitelist()
     def cancel_ewb(self):
+        """
+        Cancels the e-Way Bill on the GST system. Only possible within 24 hours of
+        its generation. Cancel the invoice first.
+        """
         if self.eway_bill_no:
             if get_datetime(self.eway_bill_date) + timedelta(hours=24) > datetime.now():
-                # You can cancel eWay Bill only within first 24 hours of creation
-                # First Cancel Invoice and then Cancel eWay Bill if all goes well then cancel eWB doc
-                frappe.msgprint('You can cancel {}'.format(frappe.get_desk_link(self.doctype, self.name)))
+                cancel_ewb_on_portal(self.eway_bill_no, remark=f"Cancelled in ERP by {frappe.session.user}")
+                self.db_set("status", "CNL")
+                frappe.msgprint(f"Cancelled eWay Bill {self.eway_bill_no} on the GST system")
             else:
                 frappe.throw('{} Created More than 24 hours and hence cannot cancel'.
                                          format(frappe.get_desk_link(self.doctype, self.name)))
 
     def on_cancel(self):
-        self.cancel_ewb()
+        if self.status != "CNL":
+            self.cancel_ewb()
 
 @frappe.whitelist()
 def ewb_po_query(doctype, txt, searchfield, start, page_len, filters, as_dict=False):
