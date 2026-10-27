@@ -11,14 +11,14 @@ Tests for einv.py on WhiteBooks (issues #17, #19):
 - TestSandboxRoundTrip runs against the WhiteBooks sandbox only when the site is
   in the sandbox and site_config has whitebooks_sandbox_test_invoice (a
   submitted Sales Invoice that has no IRN yet).
-- The HSN description regression on the payload builder.
+- The item list: Items Synopsis rows with GST HSN Code descriptions, the item-wise
+  switch, and a query count that does not grow with the rows.
 
 Writes run in one transaction that is rolled back (SiteTestCase).
 
 Run: bench --site dev-rb-v12 run-tests --module rohit_common.rohit_common.india_gst_api.test_einv_whitebooks
 """
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import frappe
@@ -26,26 +26,11 @@ import frappe
 from rohit_common.rohit_common.india_gst_api import einv
 from rohit_common.rohit_common.india_gst_api.common import use_gst_sandbox
 from rohit_common.rohit_common.scheduled_tasks.test_auto_einvoice_tasks import SiteTestCase
+from rohit_common.utils.query_guard import assert_max_queries
 
 EINV = "rohit_common.rohit_common.india_gst_api.einv"
 IRN_REPLY = {"Irn": "IRN123", "AckNo": 112010000000001, "AckDt": "2026-10-27 10:00:00",
              "SignedQRCode": "eyJhbGciOi.signed.qr"}
-
-
-class _FakeFrappeDict(dict):
-    """Minimal stand-in for frappe._dict — a real dict subclass with
-    attribute access, so each frappe._dict({}) call in the code under test
-    produces a genuinely independent instance. Using a bare MagicMock for
-    frappe._dict is a footgun here: mock_frappe._dict({}) returns the SAME
-    MagicMock (its .return_value) on every call, so multiple loop
-    iterations in get_einv_item_details() would silently write into one
-    shared object instead of one per line item."""
-
-    def __getattr__(self, name):
-        return self.get(name)
-
-    def __setattr__(self, name, value):
-        self[name] = value
 
 
 @patch(f"{EINV}.auto_ewb_needed", return_value=False)
@@ -215,93 +200,89 @@ class TestSandboxRoundTrip(SiteTestCase):
             "attached_to_field": "qrcode_image", "creation": [">=", self.started]}))
 
 
-def _fake_hsn_doc(description, is_service=0):
-    return SimpleNamespace(description=description, is_service=is_service)
+def sent_hsn_texts(rows):
+    return {row.PrdDesc for row in rows}
 
 
-def _fake_sales_invoice_with_items():
-    item = SimpleNamespace(
-        idx=1,
-        description="SuperWidget X200 Cartridge — proprietary product name",
-        gst_hsn_code="8443",
-        qty=2,
-        uom="Nos",
-        base_rate=100.0,
-        base_amount=200.0,
-    )
-    return SimpleNamespace(items=[item])
+class TestEinvoiceItems(SiteTestCase):
+    """get_einv_item_details() lists the Items Synopsis with GST HSN Code descriptions,
+    unless Rohit Settings asks for item-wise details. Real invoices, rolled back."""
 
+    def invoices_with_synopsis(self, limit):
+        """Submitted invoices whose synopsis has fewer rows than the item table"""
+        names = [row[0] for row in frappe.db.sql("""SELECT si.name FROM `tabSales Invoice` si
+            WHERE si.docstatus = 1 AND
+            (SELECT COUNT(*) FROM `tabSales Invoice Item` i WHERE i.parent = si.name
+                AND i.parentfield = 'items_synopsis') BETWEEN 1 AND
+            (SELECT COUNT(*) FROM `tabSales Invoice Item` i WHERE i.parent = si.name
+                AND i.parentfield = 'items') - 1
+            ORDER BY si.posting_date DESC LIMIT %s""", (limit,))]
+        if len(names) < limit:
+            self.skipTest(f"Needs {limit} submitted Sales Invoices with an Items Synopsis")
+        return names
 
-class TestDescriptionSubstitutionRegression(unittest.TestCase):
-    """Guards the privacy behavior flagged in Premise 3: get_einv_item_details()
-    must send the HSN code's generic description, never the item's real
-    description, and must NOT combine/aggregate line items — one entry per
-    row, full itemwise price/tax detail intact. See the design doc's
-    corrected Premise 3 (2026-08-22)."""
+    def set_itemwise(self, value):
+        frappe.db.set_value("Rohit Settings", "Rohit Settings", "einvoice_itemwise_details", value)
 
-    @patch("rohit_common.rohit_common.india_gst_api.einv.get_gst_based_uom")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.get_taxes_type")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.frappe")
-    def test_sends_hsn_description_not_item_description(
-        self, mock_frappe, mock_get_taxes_type, mock_get_uom
-    ):
-        mock_frappe._dict = _FakeFrappeDict
-        mock_frappe.get_doc.side_effect = lambda doctype, name: (
-            _fake_sales_invoice_with_items()
-            if doctype == "Sales Invoice"
-            else _fake_hsn_doc("Machinery for printing — generic HSN description")
-        )
-        mock_get_taxes_type.return_value = {
-            "tax_val": 200, "tot_val": 236, "cgst_amt": 18, "sgst_amt": 18,
-            "igst_amt": 0, "discount_amt": 0, "other_amt": 0, "gst_per": 18,
-            "cgst_per": 9, "sgst_per": 9, "igst_per": 0,
-        }
-        mock_get_uom.return_value = "NOS"
+    def test_synopsis_rows_with_hsn_descriptions_and_no_item_text(self):
+        self.set_itemwise(0)
+        name = self.invoices_with_synopsis(1)[0]
+        doc = frappe.get_doc("Sales Invoice", name)
 
-        itm_lst, val_dt = einv.get_einv_item_details("Sales Invoice", "SINV-0001")
+        rows, val_dt = einv.get_einv_item_details("Sales Invoice", name)
 
-        self.assertEqual(len(itm_lst), 1)
-        self.assertEqual(itm_lst[0].PrdDesc, "Machinery for printing — generic HSN description")
-        self.assertNotIn("SuperWidget", itm_lst[0].PrdDesc)
-        # Not aggregated: itemwise price/tax fields are still populated per row.
-        self.assertEqual(itm_lst[0].UnitPrice, 100.0)
-        self.assertEqual(itm_lst[0].TotAmt, 200.0)
-        self.assertEqual(itm_lst[0].GstRt, 18)
+        self.assertEqual(len(rows), len(doc.items_synopsis))
+        self.assertLess(len(rows), len(doc.items))
+        for row, synopsis in zip(rows, doc.items_synopsis):
+            hsn_desc = frappe.db.get_value("GST HSN Code", synopsis.gst_hsn_code, "description")
+            self.assertEqual(row.PrdDesc, (hsn_desc or "")[:299])
+            self.assertEqual(row.TotAmt, round(abs(synopsis.base_amount), 2))
+        sent = " ".join(row.PrdDesc for row in rows)
+        for item in doc.items:
+            if item.description and item.description not in sent_hsn_texts(rows):
+                self.assertNotIn(item.description, sent)
+        self.assertAlmostEqual(sum(row.AssAmt for row in rows), val_dt.AssVal, delta=1)
 
-    @patch("rohit_common.rohit_common.india_gst_api.einv.get_gst_based_uom")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.get_taxes_type")
-    @patch("rohit_common.rohit_common.india_gst_api.einv.frappe")
-    def test_one_row_per_line_item_not_combined_by_hsn(
-        self, mock_frappe, mock_get_taxes_type, mock_get_uom
-    ):
-        item_a = SimpleNamespace(
-            idx=1, description="Item A", gst_hsn_code="8443",
-            qty=1, uom="Nos", base_rate=50.0, base_amount=50.0,
-        )
-        item_b = SimpleNamespace(
-            idx=2, description="Item B", gst_hsn_code="8443",  # same HSN as item_a
-            qty=1, uom="Nos", base_rate=75.0, base_amount=75.0,
-        )
-        sinv = SimpleNamespace(items=[item_a, item_b])
-        mock_frappe._dict = _FakeFrappeDict
-        mock_frappe.get_doc.side_effect = lambda doctype, name: (
-            sinv if doctype == "Sales Invoice" else _fake_hsn_doc("Generic HSN text")
-        )
-        mock_get_taxes_type.return_value = {
-            "tax_val": 125, "tot_val": 147.5, "cgst_amt": 11.25, "sgst_amt": 11.25,
-            "igst_amt": 0, "discount_amt": 0, "other_amt": 0, "gst_per": 18,
-            "cgst_per": 9, "sgst_per": 9, "igst_per": 0,
-        }
-        mock_get_uom.return_value = "NOS"
+    def test_checkbox_sends_the_item_table(self):
+        self.set_itemwise(1)
+        name = self.invoices_with_synopsis(1)[0]
 
-        itm_lst, _ = einv.get_einv_item_details("Sales Invoice", "SINV-0001")
+        rows, _ = einv.get_einv_item_details("Sales Invoice", name)
 
-        # Two distinct items sharing an HSN code stay as two rows, not one
-        # combined row — the design doc's original "aggregation" claim was
-        # wrong (corrected 2026-08-22); this asserts the actual behavior.
-        self.assertEqual(len(itm_lst), 2)
-        self.assertEqual(itm_lst[0].TotAmt, 50.0)
-        self.assertEqual(itm_lst[1].TotAmt, 75.0)
+        items = frappe.get_doc("Sales Invoice", name).items
+        self.assertEqual([row.TotAmt for row in rows], [round(abs(item.base_amount), 2) for item in items])
+
+    def test_stale_synopsis_throws_instead_of_sending_prices(self):
+        self.set_itemwise(0)
+        name = self.invoices_with_synopsis(1)[0]
+        synopsis = frappe.db.get_value("Sales Invoice Item", {"parent": name, "parentfield": "items_synopsis"})
+        frappe.db.set_value("Sales Invoice Item", synopsis, "base_amount", 1, update_modified=False)
+
+        with self.assertRaises(frappe.ValidationError):
+            einv.get_einv_item_details("Sales Invoice", name)
+
+    def test_synopsis_builder_fetches_tariffs_in_one_query(self):
+        from rohit_common.rohit_common.validations.sales_invoice import get_item_synopsis
+        doc = frappe.get_doc("Sales Invoice", self.invoices_with_synopsis(1)[0])
+        get_item_synopsis(doc)  # warm the meta cache; count only the per-call queries
+
+        with assert_max_queries(1, test_case=self):
+            it_list, _ = get_item_synopsis(doc)
+
+        self.assertEqual(sum(row.base_amount for row in it_list), sum(item.base_amount for item in doc.items))
+
+    def test_query_count_does_not_grow_with_rows(self):
+        self.set_itemwise(1)
+        counts = []
+        for name in self.invoices_with_synopsis(2):
+            einv.get_einv_item_details("Sales Invoice", name)  # warm the caches
+            with assert_max_queries(100, test_case=self) as guard:
+                einv.get_einv_item_details("Sales Invoice", name)
+            counts.append((guard.count, len(frappe.get_doc("Sales Invoice", name).items)))
+        (first, first_rows), (second, second_rows) = counts
+        if first_rows == second_rows:
+            self.skipTest("Needs two invoices with a different number of items")
+        self.assertEqual(first, second, f"queries per run {counts} (count, items)")
 
 
 if __name__ == "__main__":

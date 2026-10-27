@@ -41,6 +41,7 @@
   "disable_gstin_validation",
   "cb8_1",
   "enable_einvoice",
+  "einvoice_itemwise_details",
   "einvoice_applicable_date",
   "eway_bill_limit",
   "auto_generate_ewb_from_irn",
@@ -274,6 +275,14 @@
    "label": "Enable eInvoice"
   },
   {
+   "default": "0",
+   "depends_on": "enable_einvoice",
+   "description": "Off: the e-Invoice lists the Items Synopsis (one row per HSN and UOM), so item-wise prices are not sent. On: it lists every row of the item table. Descriptions are always the GST HSN Code description.",
+   "fieldname": "einvoice_itemwise_details",
+   "fieldtype": "Check",
+   "label": "Send Item-wise Details in e-Invoice"
+  },
+  {
    "depends_on": "eval:doc.enable_einvoice===1",
    "fieldname": "einvoice_applicable_date",
    "fieldtype": "Date",
@@ -360,7 +369,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-10-27 23:01:35.756510",
+ "modified": "2026-10-27 23:15:41.659873",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "Rohit Settings",

@@ -211,9 +211,10 @@ def get_item_synopsis(doc):
         syn_tot_qty += row.qty
     if round(syn_net_total, 1) != round(doc.base_net_total, 1) or syn_tot_qty != doc.total_qty:
         needs_update = 1
+    tariffs = get_tariffs({item.gst_hsn_code for item in doc.items})
     for item in doc.items:
         if item.idx == 1:
-            it_list = update_item_table(it_list, item)
+            it_list = update_item_table(it_list, item, tariffs=tariffs)
         else:
             found = 0
             for d in it_list:
@@ -227,8 +228,19 @@ def get_item_synopsis(doc):
                         found = 1
                         break
             if found == 0:
-                it_list = update_item_table(it_list, item)
+                it_list = update_item_table(it_list, item, tariffs=tariffs)
     return it_list, needs_update
+
+
+def get_tariffs(codes):
+    """item_code and description of each Customs Tariff Number, in one query"""
+    tariffs = {row.name: row for row in frappe.get_all("Customs Tariff Number",
+        filters={"name": ["in", list(codes)]}, fields=["name", "item_code", "description"])}
+    missing = set(codes) - set(tariffs)
+    if missing:
+        frappe.throw(f"Customs Tariff Number {', '.join(sorted(str(code) for code in missing))} does not exist",
+                     title="Customs Tariff Number Missing")
+    return tariffs
 
 
 def check_delivery_note_rule(doc):
@@ -279,9 +291,10 @@ def check_delivery_note_rule(doc):
                               "SI# {3}").format(d.idx, d.item_code, d.parent, doc.name))
 
 
-def update_item_table(it_list, item_row):
+def update_item_table(it_list, item_row, tariffs=None):
     it_dict = frappe._dict({})
-    tariff_doc = frappe.get_doc('Customs Tariff Number', item_row.gst_hsn_code)
+    tariff_doc = (tariffs or {}).get(item_row.gst_hsn_code) or \
+        frappe.get_doc('Customs Tariff Number', item_row.gst_hsn_code)
     it_dict["item_code"] = tariff_doc.item_code
     it_dict["description"] = tariff_doc.description
     it_dict["qty"] = item_row.qty

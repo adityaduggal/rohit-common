@@ -124,6 +124,11 @@ field plus a backfill patch for historical invoices.
    by reading `get_einv_item_details()` that this is wrong. It's per-item
    description substitution, not aggregation; no line items are combined,
    and full itemwise price/tax detail is still sent per row.
+   **Superseded 2026-10-28**: the e-Invoice now lists the Items Synopsis (one row
+   per HSN and UOM, GST HSN Code description), so item-wise prices are not sent.
+   Rohit Settings "Send Item-wise Details in e-Invoice" switches back to the item
+   table. The code had sent the item table since it was written, against its own
+   docstring.
 4. **No live-fallback flag, no dual-provider runtime switch.** WhiteBooks
    fully replaces Charteredinfo — validated per-API-family against
    WhiteBooks' sandbox before any production cutover, then the old

@@ -222,9 +222,11 @@ def get_transporter_gstin(tpt_name):
 def get_einv_item_details(dtype, dname):
     """
     Returns item details dictionary for the Einvoice Json based on following rules for RIGPL
-    1. for Sales Invoice the Item Details is in synopsis to avoid showing itemwise price details
-    2. For JV where there is no Qty involved the system automatically adds the item details
-        2.1 Here the problem would come with the HSN code for items in case of JV for TOD (figure)
+    1. For Sales Invoice the items come from the Items Synopsis (one row per HSN and UOM), so
+       item-wise prices do not go out. Rohit Settings "Send Item-wise Details in e-Invoice"
+       switches to the item table.
+    2. PrdDesc is the GST HSN Code description, never the item description.
+    HSN codes and GST UOM codes are fetched in one query each, not per row.
     """
     itm_lst = []
     val_dt = frappe._dict({})
@@ -239,21 +241,19 @@ def get_einv_item_details(dtype, dname):
         val_dt.Discount = round(abs(tax_details.get("discount_amt", 0)), 2)
         val_dt.OthChrg = round(abs(tax_details.get("other_amt", 0)), 2)
         gst_rate = tax_details.get("gst_per")
-        for row in dtd.items:
+        rows = get_einv_item_rows(dtd)
+        hsn_codes = get_hsn_details({row.gst_hsn_code for row in rows})
+        gst_uoms = get_gst_uoms({row.uom for row in rows})
+        for row in rows:
             it_row_dict = frappe._dict({})
-            hsn_doc = frappe.get_doc("GST HSN Code", row.gst_hsn_code)
-            is_ser = flt(hsn_doc.is_service)
-            if is_ser == 0:
-                is_ser = "N"
-            else:
-                is_ser = "Y"
+            hsn = hsn_codes[row.gst_hsn_code]
             it_row_dict.SlNo = str(row.idx)
-            it_row_dict.PrdDesc = hsn_doc.description[:299]
-            it_row_dict.IsServc = is_ser
+            it_row_dict.PrdDesc = (hsn.description or "")[:299]
+            it_row_dict.IsServc = "Y" if cint(hsn.is_service) else "N"
             it_row_dict.HsnCd = row.gst_hsn_code
             it_row_dict.Qty = abs(row.qty)
-            it_row_dict.Unit = get_gst_based_uom(row.uom)
-            it_row_dict.UnitPrice = round(row.base_rate, 2)
+            it_row_dict.Unit = gst_uoms[row.uom]
+            it_row_dict.UnitPrice = round(abs(row.base_rate), 2)
             it_row_dict.TotAmt = round(abs(row.base_amount), 2)
             it_row_dict.AssAmt = round(abs(row.base_amount), 2)
             it_row_dict.GstRt = gst_rate
@@ -270,6 +270,43 @@ def get_einv_item_details(dtype, dname):
         print(message)
         frappe.throw(message)
     return itm_lst, val_dt
+
+
+def get_einv_item_rows(dtd):
+    """
+    The Sales Invoice rows the e-Invoice lists: the Items Synopsis, or the item table if
+    Rohit Settings asks for item-wise details. A synopsis that is empty or does not add up
+    to the net total throws, so item-wise prices are never sent by accident.
+    """
+    if cint(frappe.db.get_single_value("Rohit Settings", "einvoice_itemwise_details")):
+        return dtd.items
+    rows = dtd.items_synopsis
+    synopsis_total = round(sum(flt(row.base_amount) for row in rows), 1)
+    if not rows or synopsis_total != round(flt(dtd.base_net_total), 1):
+        frappe.throw(f"Items Synopsis of {dtd.name} totals {synopsis_total} but the Net Total is "
+                     f"{flt(dtd.base_net_total)}. Save the invoice again to rebuild it.",
+                     title="eInvoice Items Synopsis Mismatch")
+    return rows
+
+
+def get_hsn_details(codes):
+    """GST HSN Code description and is_service for each code, in one query"""
+    hsn_codes = {hsn.name: hsn for hsn in frappe.get_all("GST HSN Code", filters={"name": ["in", list(codes)]},
+                                                        fields=["name", "description", "is_service"])}
+    missing = set(codes) - set(hsn_codes)
+    if missing:
+        frappe.throw(f"GST HSN Code {', '.join(sorted(missing))} does not exist", title="GST HSN Code Missing")
+    return hsn_codes
+
+
+def get_gst_uoms(uoms):
+    """GST UOM code for each UOM, in one query. A UOM without one throws."""
+    gst_uoms = {uom.name: uom.eway_bill_uom for uom in frappe.get_all(
+        "UOM", filters={"name": ["in", list(uoms)]}, fields=["name", "eway_bill_uom"])}
+    for uom in uoms:
+        if not gst_uoms.get(uom):
+            gst_uoms[uom] = get_gst_based_uom(uom)  # throws with where to find the code
+    return gst_uoms
 
 
 def add_einv_adr_details(einv_dt, add_name, type_of_detail, pos=None, port_code=None):
