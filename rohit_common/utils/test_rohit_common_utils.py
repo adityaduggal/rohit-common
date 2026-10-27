@@ -172,7 +172,10 @@ class TestAddressContactHooks(unittest.TestCase):
 		with patch.object(frappe.db, "sql", side_effect=recording_sql):
 			adr.save()
 
-		scans = [q for q in statements if "Dynamic Link" in q and "NOT IN" in q.upper()]
+		# The removed scan was `parent NOT IN (SELECT name FROM tabAddress)`. Frappe's own
+		# child-table save also has `name not in (...)`, but only for this Address's rows.
+		scans = [q for q in statements if "Dynamic Link" in q
+			and re.search(r"NOT\s+IN\s*\(\s*SELECT", q, re.IGNORECASE)]
 		self.assertEqual(scans, [])
 
 	def test_daily_cleanup_deletes_only_orphan_links(self):
