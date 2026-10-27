@@ -27,13 +27,20 @@ def execute():
         # flt(None) = 0 would match every Address every day and burn API quota
         print("Auto Validate GSTIN After is not set in Rohit Settings hence Skipping")
         return
-    query = """SELECT name, gstin, IFNULL(gst_validation_date, '1900-01-01') as gst_validation_date
+    update_addresses(addresses_due(auto_days), auto_days)
+
+
+def addresses_due(auto_days):
+    """
+    Addresses whose GSTIN is due for validation, the last modified first: a run that times
+    out has then checked the Addresses most likely in use. The shared-GSTIN reuse in
+    update_addresses() does not depend on this order.
+    """
+    return frappe.db.sql("""SELECT name, gstin, IFNULL(gst_validation_date, '1900-01-01') as gst_validation_date
     FROM `tabAddress`
     WHERE gstin IS NOT NULL AND gstin != 'NA' AND disabled=0 AND country = 'India'
     AND (validated_gstin IS NULL OR DATE_ADD(IFNULL(gst_validation_date, '1900-01-01'), INTERVAL %(auto_days)s DAY) < CURDATE())
-    ORDER BY gstin, name"""
-    add_list = frappe.db.sql(query, {"auto_days": auto_days}, as_dict=1)
-    update_addresses(add_list, auto_days)
+    ORDER BY modified DESC, name""", {"auto_days": auto_days}, as_dict=1)
 
 
 def update_addresses(add_list, auto_days):

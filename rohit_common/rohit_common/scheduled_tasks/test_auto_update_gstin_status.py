@@ -87,3 +87,17 @@ class TestUpdateAddresses(unittest.TestCase):
                 patch(f"{MODULE}.update_addresses") as update:
             task.execute()
         update.assert_not_called()
+
+
+class TestAddressesDue(unittest.TestCase):
+    def tearDown(self):
+        frappe.db.rollback()
+
+    def test_last_modified_address_is_checked_first(self):
+        due = task.addresses_due(60)
+        if len(due) < 2:
+            self.skipTest("Needs 2 Addresses due for GSTIN validation")
+        oldest = due[-1].name
+        frappe.db.sql("UPDATE `tabAddress` SET modified = NOW(6) WHERE name = %s", (oldest,))
+
+        self.assertEqual(task.addresses_due(60)[0].name, oldest)
