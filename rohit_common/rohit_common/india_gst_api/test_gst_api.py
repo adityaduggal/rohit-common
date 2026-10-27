@@ -92,6 +92,23 @@ class TestReturnDownloads(GstApiTestCase):
         self.assertTrue(mock_requests.get.call_args.kwargs["url"].endswith("/gstr2a/b2b"))
 
     @patch(REQUESTS)
+    def test_whitebooks_no_document_reply_gives_empty_section(self, mock_requests):
+        # Real production reply for a GSTR1 section with no data (2026-10-27).
+        mock_requests.get.return_value = fake_response({"status_cd": "0", "error": {
+            "errorCode": "RET11416", "errorMessage": "No document found in selected financial year."}})
+
+        self.assertEqual(gst_api.get_gstr1(GSTIN, "052026", {"b2cl": "b2cl"}), {"b2cl": []})
+
+    @patch(REQUESTS)
+    def test_whitebooks_error_message_is_shown(self, mock_requests):
+        mock_requests.get.return_value = fake_response({"status_cd": "0", "error": {
+            "errorCode": "RET191113", "errorMessage": "Invalid return period"}})
+
+        with self.assertRaises(frappe.ValidationError) as ctx:
+            gst_api.get_gstr1(GSTIN, "052026", {"b2b": "b2b"})
+        self.assertIn("Invalid return period", str(ctx.exception))
+
+    @patch(REQUESTS)
     def test_other_error_throws_with_raw_response(self, mock_requests):
         mock_requests.get.return_value = fake_response(
             {"status_cd": "0", "status_desc": "Invalid Session", "error": {"error_cd": "AUTH4033"}})
@@ -126,6 +143,37 @@ class TestReturnDownloads(GstApiTestCase):
         self.assertEqual(resp["data"]["gendt"], "14-08-2025")
         self.assertTrue(mock_requests.get.call_args.kwargs["url"].endswith("/gstr2b/all"))
         self.assertEqual(mock_requests.get.call_args.kwargs["params"]["rtnprd"], "072025")
+
+    @patch(REQUESTS)
+    def test_gstr2b_unwraps_gstn_payload_inside_whitebooks_data(self, mock_requests):
+        mock_requests.get.return_value = fake_response({"status_cd": "1", "data": {"chksum": "X", "data": {
+            "gendt": "14-08-2025", "docdata": {"b2b": [{"ctin": "07AAACR1567J1ZC"}]}}}})
+
+        resp = gst_api.get_gstr2b(GSTIN, "072025")
+
+        self.assertEqual(resp["data"]["gendt"], "14-08-2025")
+        self.assertEqual(resp["data"]["docdata"]["b2b"], [{"ctin": "07AAACR1567J1ZC"}])
+
+    @patch(REQUESTS)
+    def test_gstr2b_in_several_files_is_joined(self, mock_requests):
+        mock_requests.get.side_effect = [
+            fake_response({"status_cd": "1", "data": {"data": {"fc": 2}}}),
+            fake_response({"status_cd": "1", "data": {"data": {"gendt": "14-08-2025", "docdata": {"b2b": [{"ctin": "A"}]}}}}),
+            fake_response({"status_cd": "1", "data": {"data": {"gendt": "14-08-2025", "docdata": {
+                "b2b": [{"ctin": "B"}], "cdnr": [{"ctin": "C"}]}}}}),
+        ]
+
+        resp = gst_api.get_gstr2b(GSTIN, "072025")
+
+        self.assertEqual([c.kwargs["params"].get("filenum") for c in mock_requests.get.call_args_list], [None, "1", "2"])
+        self.assertEqual(resp["data"]["docdata"], {"b2b": [{"ctin": "A"}, {"ctin": "B"}], "cdnr": [{"ctin": "C"}]})
+
+    @patch(REQUESTS)
+    def test_gstr2b_without_generation_date_throws(self, mock_requests):
+        mock_requests.get.return_value = fake_response({"status_cd": "1", "data": {"docdata": {}}})
+
+        with self.assertRaises(frappe.ValidationError):
+            gst_api.get_gstr2b(GSTIN, "072025")
 
 
 class TestOtp(GstApiTestCase):

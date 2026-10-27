@@ -23,7 +23,9 @@ the first sandbox call, then remove this note):
 2. Data calls return {"status_cd": "1", "data": {<section key>: [...]}}, which is
    the same envelope /public/rettrack uses. See _unwrap().
 3. "No data for this section/period" comes back as status_cd "0" with one of
-   NO_DATA_ERROR_CODES in error.error_cd. See _error_code().
+   NO_DATA_ERROR_CODES. CONFIRMED 2026-10-27 for RET11416 on a production GSTR1 b2cl
+   call: {"status_cd": "0", "error": {"errorCode": ..., "errorMessage": ...}}.
+   See _error_code().
 Every failure message includes the raw response, so a wrong guess shows its real
 shape on the first live call.
 """
@@ -57,18 +59,50 @@ def get_gstr2a(gstin: str, ret_period: str, sections: dict) -> dict:
     return _get_return_sections("gstr2a", gstin, ret_period, sections)
 
 
-def get_gstr2b(gstin: str, ret_period: str, file_num: str = None) -> dict:
-    """The full GSTR2B response. Callers read response["data"]["gendt"/"docdata"]."""
+def get_gstr2b(gstin: str, ret_period: str) -> dict:
+    """
+    GSTR2B for a period as {"data": GSTN payload}. Callers read response["data"]["gendt"/"docdata"].
+    A large GSTR2B comes back as a file count ("fc"); then every file is fetched and the docdata
+    sections are joined.
+    """
     reg = get_registration(gstin)
     assert_session_active(reg)
+    session = _session(reg)
+    context = f"GSTR2B for GSTIN {gstin}, period {ret_period}"
     params = {"gstin": gstin, "rtnprd": ret_period}
-    if file_num:
-        params["filenum"] = file_num
-    resp = _get(_session(reg), "/gstr2b/all", params)
+    payload = _gstr2b_payload(_get(session, "/gstr2b/all", params), context)
+    file_count = cint(payload.get("fc"))
+    if file_count and not payload.get("gendt"):
+        files = [_gstr2b_payload(_get(session, "/gstr2b/all", dict(params, filenum=str(num))), context)
+                 for num in range(1, file_count + 1)]
+        payload = _join_gstr2b_files(files)
+    if not payload.get("gendt"):
+        frappe.throw(f"{context}: the reply has no generation date (gendt). Payload keys: {sorted(payload)}",
+                     title="WhiteBooks GSTR2B Reply Not Recognised")
+    return {"data": payload}
+
+
+def _gstr2b_payload(resp, context):
+    """The GSTN GSTR2B payload. WhiteBooks wraps GSTN's own {"data": {...}} in its "data" key."""
     if not _is_success(resp):
-        frappe.throw(f"GSTR2B for GSTIN {gstin}, period {ret_period} failed: {_describe(resp)}",
-                     title="WhiteBooks GSTR2B Error")
-    return resp
+        frappe.throw(f"{context} failed: {_describe(resp)}", title="WhiteBooks GSTR2B Error")
+    payload = resp.get("data")
+    while isinstance(payload, dict) and "gendt" not in payload and "fc" not in payload \
+            and isinstance(payload.get("data"), dict):
+        payload = payload["data"]
+    if not isinstance(payload, dict):
+        frappe.throw(f"{context}: reply has no data. Raw response: {resp}",
+                     title="WhiteBooks GSTR2B Reply Not Recognised")
+    return payload
+
+
+def _join_gstr2b_files(files):
+    joined = dict(files[0], docdata={})
+    for part in files:
+        for section, rows in (part.get("docdata") or {}).items():
+            joined["docdata"].setdefault(section, []).extend(rows or [])
+        joined["gendt"] = joined.get("gendt") or part.get("gendt")
+    return joined
 
 
 @frappe.whitelist()
@@ -268,14 +302,17 @@ def _is_success(resp):
 
 
 def _error_code(resp):
+    # GSTN uses error_cd; WhiteBooks replies use errorCode.
     error = resp.get("error")
     if isinstance(error, dict):
-        return error.get("error_cd")
-    return resp.get("error_cd")
+        return error.get("errorCode") or error.get("error_cd")
+    return resp.get("errorCode") or resp.get("error_cd")
 
 
 def _describe(resp):
-    return f"{resp.get('status_desc') or resp.get('error') or ''} (raw response: {resp})"
+    error = resp.get("error")
+    message = error.get("errorMessage") or error.get("message") if isinstance(error, dict) else error
+    return f"{resp.get('status_desc') or message or ''} (raw response: {resp})"
 
 
 def _extract_txn(resp):
