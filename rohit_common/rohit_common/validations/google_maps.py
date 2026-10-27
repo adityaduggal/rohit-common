@@ -9,6 +9,7 @@ import requests
 import urllib.parse
 
 file_format = "json"
+timeout = 15
 
 def get_distance_matrix(origin, dest, mode='driving', units='metric'):
     key = get_google_maps_api_key()
@@ -18,20 +19,24 @@ def get_distance_matrix(origin, dest, mode='driving', units='metric'):
     characters = [" ", "#"]
     for chrc in characters:
         full_url = full_url.replace(chrc, "+")
-    response = requests.get(url=full_url)
-    # print(response.content)
+    try:
+        response = requests.get(url=full_url, timeout=timeout)
+    except requests.RequestException as e:
+        # The URL has the API key, so log only the error type
+        frappe.throw(f"Google Maps did not reply ({type(e).__name__}). Enter the distance by hand.")
     response_json = json.loads(response.content)
     # print(response_json)
     return response_json
 
 
 def get_approx_dist_frm_matrix(dist_matrix, unit="km"):
-    dst = 0
-    if dist_matrix.get('status') == 'OK':
-        rows = dist_matrix.get('rows')[0]
-        elements = rows.get('elements')[0]
-        dist = elements.get('distance')
-        dist_mts = dist.get('value')
+    if dist_matrix.get('status') != 'OK':
+        frappe.throw(f"Google Maps could not find the distance: {dist_matrix.get('status')}. "
+                     "Enter the distance by hand.")
+    rows = dist_matrix.get('rows')[0]
+    elements = rows.get('elements')[0]
+    dist = elements.get('distance')
+    dist_mts = dist.get('value')
     if unit=='km':
         dst = dist_mts/1000
     else:
@@ -190,7 +195,13 @@ def get_gmaps_json(action, parameters):
     for char in replace_chars:
         full_url = full_url.replace(char, "+")
 
-    response = requests.get(url=full_url)
+    try:
+        response = requests.get(url=full_url, timeout=timeout)
+    except requests.RequestException as e:
+        # The URL has the API key, so log only the error type. A non-OK status is
+        # handled by the callers, and the next save tries again (#20).
+        frappe.log_error(f"Google Maps {action} failed: {type(e).__name__}", "Google Maps Request Failed")
+        return {"status": "REQUEST_FAILED"}
     response_json = json.loads(response.content)
 
     return response_json

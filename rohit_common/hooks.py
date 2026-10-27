@@ -212,6 +212,8 @@ scheduler_events = {
     "daily": [
         "rohit_common.rohit_common.scheduled_tasks.auto_update_from_erp.update_export_invoices",
         "rohit_common.rohit_common.scheduled_tasks.revoke_locked_doc_shares.execute",
+        # Orphan Address/Contact Dynamic Links, once a day instead of on each save (#20)
+        "rohit_common.utils.rohit_common_utils.sanitize_dynamic_link",
     ],
     "hourly": [
         "rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files.check_correct_folders",

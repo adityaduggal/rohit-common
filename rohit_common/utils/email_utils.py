@@ -7,6 +7,8 @@ import requests
 from datetime import datetime
 from frappe.utils import flt, validate_email_address
 
+timeout = 15
+
 
 def comma_email_validations(csv_email, backend=True):
     """
@@ -150,7 +152,13 @@ def bouncify_email(email_id):
     headers = {"Accept": "application/json"}
     if api_key and base_url:
         full_url = f"{base_url}{action}?apikey={api_key}&email={email_id}"
-        resp = requests.get(full_url, headers=headers)
+        try:
+            resp = requests.get(full_url, headers=headers, timeout=timeout)
+        except requests.RequestException as e:
+            # The URL has the API key, so log only the error type
+            frappe.log_error(f"Bouncify verify failed for {email_id}: {type(e).__name__}",
+                             "Bouncify Request Failed")
+            return def_resp
         return resp.text
     else:
         return def_resp
@@ -158,13 +166,24 @@ def bouncify_email(email_id):
 
 def get_bouncify_credits():
     """
-    Returns the credits balance for Bouncify
+    Returns the credits balance for Bouncify. It is fetched once per request or job,
+    not once per email (#20).
     """
+    if getattr(frappe.local, "bouncify_credits", None) is None:
+        frappe.local.bouncify_credits = fetch_bouncify_credits()
+    return frappe.local.bouncify_credits
+
+
+def fetch_bouncify_credits():
     action = "info"
     api_key, base_url = get_bouncify_api_key()
     if api_key and base_url:
         full_url = f"{base_url}{action}?apikey={api_key}"
-        resp = requests.get(full_url)
+        try:
+            resp = requests.get(full_url, timeout=timeout)
+        except requests.RequestException as e:
+            frappe.log_error(f"Bouncify credits check failed: {type(e).__name__}", "Bouncify Request Failed")
+            return 0
         return resp.text
     else:
         return 0

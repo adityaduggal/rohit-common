@@ -67,12 +67,11 @@ def gstin_validation(doc):
                     frappe.throw("Selected State is NOT Valid for {0}".format(doc.state_rigpl))
                 if doc.gstin[:2] != state.state_code_numeric:
                     # fetch and update the state automatically else throw error
-                    state_from_gst = frappe.db.sql("""SELECT name FROM `tabState`
-                    WHERE state_code_numeric = '%s'""" % (doc.gstin[:2]), as_list=1)
+                    state_from_gst = frappe.db.get_value("State", {"state_code_numeric": doc.gstin[:2]})
                     if state_from_gst:
-                        doc.state_rigpl = state_from_gst[0][0]
-                        doc.gst_state = state_from_gst[0][0]
-                        doc.state = state_from_gst[0][0]
+                        doc.state_rigpl = state_from_gst
+                        doc.gst_state = state_from_gst
+                        doc.state = state_from_gst
                     else:
                         frappe.throw("State Selected {0} for Address {1}, GSTIN number should begin with {2}".
                                      format(doc.state_rigpl, doc.name, state.state_code_numeric))
@@ -103,8 +102,7 @@ def country_validation(doc):
 
         if country_doc.known_states == 1:
             # Country has known states means state doctype should have states for that country
-            state_list = frappe.db.sql(f"""SELECT name FROM `tabState`
-                WHERE country = '{doc.country}'""", as_dict=1)
+            state_list = frappe.get_all("State", filters={"country": doc.country}, pluck="name")
             if state_list:
                 if doc.state_rigpl is None or not doc.state_rigpl or doc.state_rigpl == "":
                     frappe.throw(f"State RIGPL for Country {doc.country} is Mandatory in \

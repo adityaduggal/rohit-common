@@ -256,7 +256,8 @@ def validate_contact_master(con_doc, backend=True):
             print(message)
         else:
             frappe.throw(message)
-    if not con_doc.links:
+    # Frappe makes a Contact with no links for each new User (user.create_contact)
+    if not con_doc.links and not con_doc.user:
         message = f"{frappe.get_desk_link(con_doc.doctype, con_doc.name)} is not Linked to Any \
         Master"
         if backend == 1:

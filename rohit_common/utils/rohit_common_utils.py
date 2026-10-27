@@ -34,8 +34,6 @@ def check_or_rename_doc(document, backend):
                     print(f"Unable to Rename {document.doctype}: {entered_name} due to Error {e}")
             else:
                 frappe.throw(message)
-    if document.doctype in ("Address", "Contact"):
-        sanitize_dynamic_link(parenttype=document.doctype)
 
 
 def get_sanitized_name(document):
@@ -316,24 +314,25 @@ def check_sales_taxes_integrity(document):
             "Empty Tax Table is not Allowed for Sales Invoice {0}".format(document.name))
 
 
-def sanitize_dynamic_link(parenttype):
+def sanitize_dynamic_link(parenttype=None):
     """
-    Finds the wrong entries in Dynamic Link for Address or Contact in DL Table and Deletes them
+    Deletes the Dynamic Link rows of Address or Contact whose parent no longer exists.
+    Runs daily (hooks.py) as one DELETE per parenttype, not on each save (#20).
     """
-    query = f"""SELECT name, parenttype, parent, link_doctype, link_name FROM `tabDynamic Link`
-    WHERE parenttype = '{parenttype}' AND parent NOT IN (SELECT name FROM `tab{parenttype}`)"""
-    dl_links = frappe.db.sql(query, as_dict=1)
-    for dlnk in dl_links:
-        print(f"""Deleting Dynamic Link for {dlnk.parenttype}: {dlnk.parent} linked to
-            {dlnk.link_doctype} and {dlnk.link_name}""")
-        frappe.db.delete("Dynamic Link", dlnk.name)
+    parenttypes = ("Address", "Contact")
+    if parenttype:
+        parenttypes = [ptype for ptype in parenttypes if ptype == parenttype]
+    for ptype in parenttypes:
+        # ptype comes only from the fixed tuple above, so the table name is safe
+        frappe.db.sql(f"""DELETE dl FROM `tabDynamic Link` dl
+            LEFT JOIN `tab{ptype}` p ON p.name = dl.parent
+            WHERE dl.parenttype = %(ptype)s AND p.name IS NULL""", {"ptype": ptype})
+    frappe.db.commit()
 
 
 def check_dynamic_link(parenttype, parent, link_doctype, link_name):
-    link_type = frappe.db.sql("""SELECT name FROM `tabDynamic Link`
-        WHERE docstatus = 0 AND parenttype = '%s' AND parent = '%s'
-        AND link_doctype = '%s' AND link_name = '%s'""" % (parenttype, parent, link_doctype, link_name), as_list=1)
-    if not link_type:
+    if not frappe.db.exists("Dynamic Link", {"docstatus": 0, "parenttype": parenttype,
+            "parent": parent, "link_doctype": link_doctype, "link_name": link_name}):
         frappe.throw("{} {} does not belong to {} {}".format(
             parenttype, parent, link_doctype, link_name))
 

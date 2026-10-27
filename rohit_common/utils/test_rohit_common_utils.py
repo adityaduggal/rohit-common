@@ -4,13 +4,18 @@
 from __future__ import unicode_literals
 
 import os
+import re
 import unittest
+from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.utils import get_files_path
+import requests
+from frappe.utils import get_files_path, random_string
 
+from rohit_common.rohit_common.validations import google_maps
+from rohit_common.utils import email_utils
 from rohit_common.utils.query_guard import assert_max_queries
-from rohit_common.utils.rohit_common_utils import rebuild_tree
+from rohit_common.utils.rohit_common_utils import rebuild_tree, sanitize_dynamic_link
 
 
 TEST_FILE_NAMES = [
@@ -130,3 +135,84 @@ class TestRebuildTree(unittest.TestCase):
 		root_a_range = set(range(root_a_lft, root_a_rgt + 1))
 		root_b_range = set(range(root_b_lft, root_b_rgt + 1))
 		self.assertEqual(root_a_range & root_b_range, set())
+
+
+class TestAddressContactHooks(unittest.TestCase):
+	"""
+	Issue #20: Address/Contact saves must not scan the whole Dynamic Link table,
+	HTTP calls must time out, and Frappe's Contact for a new User must save.
+	requests.get is patched only to stand in for Google Maps and Bouncify.
+	"""
+
+	def setUp(self):
+		frappe.local.bouncify_credits = None
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.local.bouncify_credits = None
+
+	@patch.object(email_utils.requests, "get", side_effect=requests.ConnectionError)
+	def test_address_save_does_not_scan_dynamic_link(self, _get):
+		names = frappe.get_all("Address", filters={"disabled": 0, "country": "India"},
+			pluck="name", limit=50)
+		# A name with special characters would be renamed, which is a different path
+		name = next((n for n in names if re.fullmatch(r"[A-Za-z0-9\-]+", n)), None)
+		if not name:
+			self.skipTest("No enabled India Address with a plain name on this site")
+		adr = frappe.get_doc("Address", name)
+		adr.flags.ignore_mandatory = True
+
+		statements = []
+		original_sql = frappe.db.sql
+
+		def recording_sql(query, *args, **kwargs):
+			statements.append(str(query))
+			return original_sql(query, *args, **kwargs)
+
+		with patch.object(frappe.db, "sql", side_effect=recording_sql):
+			adr.save()
+
+		scans = [q for q in statements if "Dynamic Link" in q and "NOT IN" in q.upper()]
+		self.assertEqual(scans, [])
+
+	def test_daily_cleanup_deletes_only_orphan_links(self):
+		orphan = "test-orphan-dl-" + random_string(8)
+		frappe.db.sql("""INSERT INTO `tabDynamic Link`
+			(name, parent, parenttype, parentfield, link_doctype, link_name)
+			VALUES (%(name)s, %(parent)s, 'Address', 'links', 'Customer', 'X')""",
+			{"name": orphan, "parent": "no-such-address-" + random_string(8)})
+		kept = frappe.db.get_value("Dynamic Link", {"parenttype": "Address"}, "name")
+		kept = kept if kept != orphan else None
+
+		with assert_max_queries(4, test_case=self):
+			sanitize_dynamic_link()
+
+		self.assertFalse(frappe.db.exists("Dynamic Link", orphan))
+		if kept:
+			self.assertTrue(frappe.db.exists("Dynamic Link", kept))
+
+	@patch.object(email_utils.requests, "get", side_effect=requests.ConnectionError)
+	def test_new_user_gets_its_contact(self, _get):
+		email = f"test-n20-{random_string(8).lower()}@example.com"
+		frappe.get_doc({"doctype": "User", "email": email, "first_name": "Issue Twenty",
+			"send_welcome_email": 0}).insert(ignore_permissions=True)
+		self.assertTrue(frappe.db.exists("Contact", {"user": email}))
+
+	@patch.object(google_maps, "get_google_maps_key_url", return_value=("key", "https://maps.test/"))
+	@patch.object(google_maps.requests, "get", side_effect=requests.Timeout)
+	def test_gmaps_timeout_keeps_the_save_working(self, mock_get, _key):
+		reply = google_maps.get_gmaps_json("geocode", "address=+Test")
+		self.assertEqual(reply, {"status": "REQUEST_FAILED"})
+		self.assertEqual(mock_get.call_args.kwargs["timeout"], google_maps.timeout)
+
+	@patch.object(email_utils, "get_bouncify_api_key", return_value=("key", "https://bouncify.test/"))
+	@patch.object(email_utils.requests, "get")
+	def test_bouncify_credits_fetched_once_per_request(self, mock_get, _key):
+		mock_get.return_value = MagicMock(text='{"success": 0}')
+		email_utils.process_bouncify_response("a@example.com")
+		email_utils.process_bouncify_response("b@example.com")
+
+		info_calls = [c for c in mock_get.call_args_list if "/info?" in c.args[0]]
+		self.assertEqual(len(info_calls), 1)
+		for call in mock_get.call_args_list:
+			self.assertEqual(call.kwargs["timeout"], email_utils.timeout)
