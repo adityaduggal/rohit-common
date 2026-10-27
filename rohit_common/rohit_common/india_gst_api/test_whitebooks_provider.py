@@ -18,6 +18,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from rohit_common.rohit_common.india_gst_api import common
 from rohit_common.rohit_common.india_gst_api import whitebooks_provider as wb
 
 
@@ -61,10 +62,25 @@ class TestGetBaseUrl(unittest.TestCase):
             wb.get_base_url(wb.EINVOICE), "https://apisandbox.whitebooks.in/einvoice"
         )
 
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.is_developer_mode", return_value=False)
     @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
-    def test_production_mode_uses_production_host(self, mock_frappe):
+    def test_production_mode_uses_production_host(self, mock_frappe, _dev_mode):
         mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
         self.assertEqual(wb.get_base_url(wb.EWAY), "https://api.whitebooks.in/eway")
+
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.is_developer_mode", return_value=True)
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    def test_developer_mode_forces_sandbox_for_document_families(self, mock_frappe, _dev_mode):
+        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
+        self.assertEqual(wb.get_base_url(wb.EINVOICE), "https://apisandbox.whitebooks.in/einvoice")
+        self.assertEqual(wb.get_base_url(wb.EWAY), "https://apisandbox.whitebooks.in/eway")
+
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.is_developer_mode", return_value=True)
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    def test_developer_mode_leaves_public_gst_on_the_checkbox(self, mock_frappe, _dev_mode):
+        """Public GST is read-only lookups, so developer_mode does not force it."""
+        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
+        self.assertEqual(wb.get_base_url(wb.PUBLIC_GST), "https://api.whitebooks.in")
 
     @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
     def test_public_gst_has_no_family_path_prefix(self, mock_frappe):
@@ -87,6 +103,48 @@ class TestGetBaseUrl(unittest.TestCase):
             mock_frappe.throw.side_effect = frappe_throw_side_effect
             with self.assertRaises(RuntimeError):
                 wb.get_base_url("not-a-real-family")
+
+
+class TestDeveloperModeCredentials(unittest.TestCase):
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.is_developer_mode", return_value=True)
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.requests")
+    @patch("rohit_common.rohit_common.india_gst_api.whitebooks_provider.frappe")
+    def test_developer_mode_uses_sandbox_token_host_and_credentials(
+        self, mock_frappe, mock_requests, _dev_mode
+    ):
+        mock_frappe.get_single.return_value = _fake_settings(sandbox_mode=0)
+        mock_frappe.cache.return_value.get_value.return_value = None
+        mock_requests.post.return_value = _fake_response(
+            200, {"access_token": "tok", "token_type": "Bearer", "expires_in": 3600}
+        )
+
+        wb.get_token(wb.EINVOICE)
+
+        self.assertEqual(mock_requests.post.call_args.args[0], "https://apisandbox.whitebooks.in/oauth/token")
+        self.assertEqual(mock_requests.post.call_args.kwargs["data"]["client_id"], "einv-sandbox-id")
+
+
+class TestUseGstSandbox(unittest.TestCase):
+    """common.use_gst_sandbox(): the rule for the Charteredinfo paths."""
+
+    @patch("rohit_common.rohit_common.india_gst_api.common.frappe")
+    def test_developer_mode_in_site_config_forces_sandbox(self, mock_frappe):
+        mock_frappe.conf = {"developer_mode": 1}
+        self.assertTrue(common.use_gst_sandbox(SimpleNamespace(sandbox_mode=0)))
+
+    @patch("rohit_common.rohit_common.india_gst_api.common.frappe")
+    def test_checkbox_decides_without_developer_mode(self, mock_frappe):
+        mock_frappe.conf = {}
+        self.assertFalse(common.use_gst_sandbox(SimpleNamespace(sandbox_mode=0)))
+        self.assertTrue(common.use_gst_sandbox(SimpleNamespace(sandbox_mode=1)))
+
+    @patch("rohit_common.rohit_common.india_gst_api.common.frappe")
+    def test_charteredinfo_base_url_follows_developer_mode(self, mock_frappe):
+        mock_frappe.conf = {"developer_mode": 1}
+        mock_frappe.get_doc.return_value = SimpleNamespace(
+            sandbox_mode=0, api_link="https://prod", sandbox_api_link="http://sandbox"
+        )
+        self.assertEqual(common.get_base_url(), ("http://sandbox", 1))
 
 
 class TestGetToken(unittest.TestCase):

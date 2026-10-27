@@ -6,6 +6,7 @@ import frappe
 from frappe.utils import flt, getdate
 from frappe.utils.background_jobs import enqueue
 from erpnext.stock.stock_ledger import NegativeStockError
+from ..india_gst_api.common import use_gst_sandbox
 from ..india_gst_api.einv import (
     einv_needed,
     generate_irn,
@@ -202,7 +203,7 @@ def _find_pending_einvoice_docs(einv_date):
 
 def _current_environment():
     rset = frappe.get_single("Rohit Settings")
-    return "Sandbox" if bool(rset.sandbox_mode) else "Production"
+    return "Sandbox" if use_gst_sandbox(rset) else "Production"
 
 
 def make_einvoice_for_docs_whitebooks_bulk():

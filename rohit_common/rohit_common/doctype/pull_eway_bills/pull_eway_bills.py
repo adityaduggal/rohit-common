@@ -7,6 +7,7 @@ import json
 from frappe.model.document import Document
 from frappe.utils import getdate, flt
 from ...india_gst_api.eway_bill_api import *
+from ...india_gst_api.common import use_gst_sandbox
 
 
 class PulleWayBills(Document):
@@ -40,8 +41,7 @@ class PulleWayBills(Document):
         Checks if the eWays are already pulled or not
         """
         gstin = frappe.get_value('Rohit Settings', 'Rohit Settings', 'gstin')
-        sandbox = int(frappe.get_value('Rohit Settings', 'Rohit Settings', 'sandbox_mode'))
-        if sandbox == 1:
+        if use_gst_sandbox():
             frappe.throw("Sandbox Mode Enabled Exiting")
         else:
             for row in self.details:

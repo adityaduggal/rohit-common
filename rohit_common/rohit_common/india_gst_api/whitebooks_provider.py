@@ -58,6 +58,8 @@ from datetime import datetime
 import frappe
 import requests
 
+from .common import is_developer_mode
+
 TIMEOUT = 15
 DEFAULT_TOKEN_VALIDITY_SEC = 3600
 
@@ -65,6 +67,9 @@ EINVOICE = "einvoice"
 EWAY = "eway"
 PUBLIC_GST = "gst"
 API_FAMILIES = (EINVOICE, EWAY, PUBLIC_GST)
+# Families that create legal documents on the GST system. On a developer_mode
+# site they always use the sandbox (common.use_gst_sandbox()).
+DOCUMENT_API_FAMILIES = (EINVOICE, EWAY)
 
 _SANDBOX_HOST = "https://apisandbox.whitebooks.in"
 _PRODUCTION_HOST = "https://api.whitebooks.in"
@@ -93,13 +98,20 @@ def _validate_api_name(api_name):
         )
 
 
+def _use_sandbox(rset, api_name):
+    """Rohit Settings.sandbox_mode, forced on for document families in
+    developer_mode — same rule as common.use_gst_sandbox()."""
+    if api_name in DOCUMENT_API_FAMILIES and is_developer_mode():
+        return True
+    return bool(rset.sandbox_mode)
+
+
 def get_base_url(api_name):
     """Base URL for the named API family, sandbox- or production-scoped per
-    Rohit Settings.sandbox_mode — same environment-selection pattern
-    common.get_base_url() already uses for the Charteredinfo/TaxPro flow."""
+    _use_sandbox()."""
     _validate_api_name(api_name)
     rset = _get_settings()
-    host = _SANDBOX_HOST if bool(rset.sandbox_mode) else _PRODUCTION_HOST
+    host = _SANDBOX_HOST if _use_sandbox(rset, api_name) else _PRODUCTION_HOST
     return host + _API_PATHS[api_name]
 
 
@@ -109,14 +121,15 @@ def _token_cache_key(api_name):
 
 def _get_client_credentials(rset, api_name):
     prefix = _CREDENTIAL_FIELD_PREFIX[api_name]
-    if bool(rset.sandbox_mode):
+    sandbox = _use_sandbox(rset, api_name)
+    if sandbox:
         client_id = getattr(rset, f"{prefix}_sandbox_client_id")
         client_secret = rset.get_password(f"{prefix}_sandbox_client_secret")
     else:
         client_id = getattr(rset, f"{prefix}_client_id")
         client_secret = rset.get_password(f"{prefix}_client_secret")
     if not client_id or not client_secret:
-        env = "sandbox" if bool(rset.sandbox_mode) else "production"
+        env = "sandbox" if sandbox else "production"
         frappe.throw(
             f"WhiteBooks {env} client_id/client_secret for {api_name!r} are not "
             "configured on Rohit Settings — set them under the WhiteBooks GSP section."
@@ -128,7 +141,7 @@ def _fetch_new_token(rset, api_name):
     client_id, client_secret = _get_client_credentials(rset, api_name)
     # Token endpoint assumed shared at the host level, not scoped under each
     # family's own path — see module docstring, assumption 3.
-    host = _SANDBOX_HOST if bool(rset.sandbox_mode) else _PRODUCTION_HOST
+    host = _SANDBOX_HOST if _use_sandbox(rset, api_name) else _PRODUCTION_HOST
     url = host + "/oauth/token"
     body = {
         "grant_type": "client_credentials",

@@ -3,7 +3,7 @@
 # -*- coding: utf-8 -*-
 import frappe
 from datetime import datetime
-from frappe.utils import flt, get_last_day, getdate
+from frappe.utils import cint, flt, get_last_day, getdate
 
 
 def get_place_of_supply(dtype, dname):
@@ -87,6 +87,24 @@ def get_default_gstin(sbox=0):
     return def_gstin
 
 
+def is_developer_mode():
+    """developer_mode from site_config.json or common_site_config.json."""
+    return bool(cint(frappe.conf.get("developer_mode")))
+
+
+def use_gst_sandbox(rset=None):
+    """
+    True if GST document APIs (e-Invoice, e-Way Bill) must use the sandbox:
+    Rohit Settings.sandbox_mode is on, or the site runs in developer_mode.
+    A developer or copied test site never sends documents to production GST,
+    even when its copied Rohit Settings still say production.
+    """
+    if is_developer_mode():
+        return True
+    rset = rset or frappe.get_single("Rohit Settings")
+    return bool(cint(rset.sandbox_mode))
+
+
 def get_base_url(sbox=0):
     """
     Returns the Base GST URL and Sandbox status as Integer in Settings
@@ -94,7 +112,7 @@ def get_base_url(sbox=0):
     rset = frappe.get_doc("Rohit Settings", "Rohit Settings")
     if sbox == 0:
         # If the sandbox mode is default to ZERO then checks if Sbox is active in settings
-        sbox = rset.sandbox_mode
+        sbox = cint(use_gst_sandbox(rset))
     if sbox == 0:
         api_link = rset.api_link
     else:
@@ -140,7 +158,7 @@ def get_api_url(api, api_type=None):
     if api_type == "common":
         api_url = '/' + api_type + 'api/' + version + '/' + api + '?'
     elif api == 'eway':
-        if rset.sandbox_mode == 1:
+        if use_gst_sandbox(rset):
             api_url = '/' + api + 'billapi/dec/' + version + '/'
         else:
             api_url = '/' + version + '/dec/'
@@ -151,7 +169,7 @@ def get_api_url(api, api_type=None):
 
 def get_gsp_details(api, action, gstin=None, api_type=None):
     rset = frappe.get_single('Rohit Settings')
-    sandbox = rset.sandbox_mode
+    sandbox = cint(use_gst_sandbox(rset))
     gsp_link = rset.api_link
     asp_id = rset.tax_pro_asp_id
     asp_pass = rset.tax_pro_password
@@ -176,7 +194,7 @@ def get_gsp_details(api, action, gstin=None, api_type=None):
     if api_type == "common":
         api_url = get_api_url(api=api, api_type=api_type)
     else:
-        if rset.sandbox_mode == 1:
+        if sandbox == 1:
             gsp_link = gsp_sandbox_link
     if api_type == 'common':
         gsp_link = gsp_link + api_url + 'aspid=' + asp_id + '&password=' + asp_pass + '&Action=' + action
