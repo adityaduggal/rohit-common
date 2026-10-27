@@ -9,11 +9,12 @@ from __future__ import unicode_literals
 import time
 import frappe
 from frappe.utils import flt
-from frappe.utils.background_jobs import enqueue
+from ...utils.background_doc_processing import enqueue_once
 
 
 def enqueue_deletion():
-    enqueue(execute, queue="long", timeout=3600)
+    enqueue_once("rohit_common.rohit_common.scheduled_tasks.auto_delete_version.execute",
+                 queue="long", timeout=3600)
 
 
 def execute():

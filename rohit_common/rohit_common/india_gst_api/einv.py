@@ -83,7 +83,10 @@ def generate_irn(dtype, dname):
             update_irn_details(dtype, dname, irn_dict)
             print("Updated IRN details")
         else:
-            print(res)
+            # Raise so the sweep logs it and backs off this invoice (#16)
+            errors = "; ".join(f"{err.get('ErrorCode')}: {err.get('ErrorMessage')}"
+                               for err in res.get("ErrorDetails") or [])
+            frappe.throw(f"IRN not generated for {dname}. {errors}", title="eInvoice Rejected")
 
 
 def attach_qrcode(dtype, dname, qrcode):

@@ -2,10 +2,12 @@
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
 
+import time
 import frappe
-from frappe.utils import flt, getdate
+import requests
+from frappe.utils import add_to_date, flt, getdate, now_datetime
 from frappe.utils.background_jobs import enqueue
-from erpnext.stock.stock_ledger import NegativeStockError
+from rq.timeouts import JobTimeoutException
 from ..india_gst_api.common import use_gst_sandbox
 from ..india_gst_api.einv import (
     einv_needed,
@@ -13,20 +15,31 @@ from ..india_gst_api.einv import (
     generate_irn_whitebooks,
     generate_irn_whitebooks_bulk,
 )
+from ...utils.background_doc_processing import enqueue_once, short_error, unmark_failed_doc
+
+SWEEP_TIMEOUT = 800
+# Both sweeps run every 15 mins. Stop picking new invoices well before the rq timeout.
+SWEEP_TIME_BUDGET = 600
+SUBMIT_BATCH_SIZE = 200
+EINV_BATCH_SIZE = 100
+EINV_FAILURE_TITLE = "eInvoice Generation Failed for "
+EINV_RETRY_AFTER_HOURS = 24
 
 
 def enq_inv_sub():
     """
     Performs Draft Invoice Submission for 14 mins max since it runs every 15 mins
     """
-    enqueue(get_docs_to_submit, queue="long", timeout=800)
+    enqueue_once("rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.get_docs_to_submit",
+                 queue="long", timeout=SWEEP_TIMEOUT)
 
 
 def enq_einv_create():
     """
     Performs eInvoice jobs for 14 mins max since it runs every 15 mins
     """
-    enqueue(make_einvoice_for_docs, queue="long", timeout=800)
+    enqueue_once("rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.make_einvoice_for_docs",
+                 queue="long", timeout=SWEEP_TIMEOUT)
 
 
 def get_unposted_invoices():
@@ -53,52 +66,67 @@ def get_unposted_invoices():
 
 def get_docs_to_submit():
     """
-    Submits the Sales Invoices or JV which are marked to Submit
+    Submits the Sales Invoices marked to Submit, oldest first, until the batch or time
+    budget runs out. An invoice that fails is unmarked with a short comment, so it does
+    not use the budget again on every run (#16).
     """
-    doc_list = ["Sales Invoice"]
-    for doc in doc_list:
-        dft_doc = frappe.db.sql(f"""SELECT name FROM `tab{doc}` WHERE docstatus = 0
-            AND marked_to_submit = 1""", as_dict=1)
-        if dft_doc:
-            for dtd in dft_doc:
-                doc_t = frappe.get_doc(doc, dtd.name)
-                try:
-                    doc_t.submit()
-                    print(f"Submitting {doc_t.name}")
-                except NegativeStockError:
-                    print(f"Negative Stock Error for {doc_t.name} hence Rolling Back")
-                    frappe.db.rollback()
-                except Exception as e:
-                    print(f"Some Other Error for {doc_t.name} and Error = {e}")
-                    frappe.db.rollback()
-                frappe.db.commit()
+    st_time = time.time()
+    dft_docs = frappe.get_all("Sales Invoice", filters={"docstatus": 0, "marked_to_submit": 1},
+        order_by="posting_date, name", limit=SUBMIT_BATCH_SIZE, pluck="name")
+    for dname in dft_docs:
+        if time.time() - st_time > SWEEP_TIME_BUDGET:
+            print(f"Time Budget of {SWEEP_TIME_BUDGET} seconds Used hence Stopping")
+            return
+        try:
+            frappe.get_doc("Sales Invoice", dname).submit()
+            frappe.db.commit()
+            print(f"Submitted {dname}")
+        except JobTimeoutException:
+            raise
+        except Exception as e:
+            unmark_failed_doc("Sales Invoice", dname, "marked_to_submit", "submit", e)
 
 
 def make_einvoice_for_docs():
     """
-    Makes the einvoice for the Docs based on eInvoice Applicability and its Date
+    Makes the einvoice for the Docs based on eInvoice Applicability and its Date.
+    Each run is limited by a batch size and a time budget. An invoice that failed in the
+    last EINV_RETRY_AFTER_HOURS is skipped, so a bad GSTIN or HSN does not make an ASP
+    call every 15 mins (#16).
     """
-    doc_list = ["Sales Invoice"]
     einv_app = flt(frappe.get_value("Rohit Settings", "Rohit Settings", "enable_einvoice"))
+    if einv_app != 1:
+        return
     einv_date = frappe.get_value("Rohit Settings", "Rohit Settings", "einvoice_applicable_date")
-    if einv_app == 1:
-        for doc in doc_list:
-            # `doc` (table name) comes from the fixed doc_list above, not user input, so
-            # it's safe to interpolate directly (bind params can't parameterize identifiers
-            # anyway). `einv_date` is a value, so it's bound rather than interpolated.
-            query = f"""SELECT name, posting_date FROM `tab{doc}` WHERE docstatus = 1 AND
-            (irn IS NULL OR ack_no IS NULL OR ack_date IS NULL) AND
-            posting_date >= %(einv_date)s ORDER BY posting_date DESC, name DESC"""
-            einv_docs = frappe.db.sql(query, {"einv_date": einv_date}, as_dict=1)
-            if einv_docs:
-                for einv in einv_docs:
-                    need_einv = einv_needed(doc, einv.name)
-                    if need_einv == 1:
-                        try:
-                            print(f"Trying to Generate eInvoice for {doc}: {einv.name}")
-                            generate_irn(dtype=doc, dname=einv.name)
-                        except Exception as e:
-                            print(e)
+    st_time = time.time()
+    einv_docs = _find_pending_einvoice_docs(einv_date, exclude=_recent_einvoice_failures(),
+        limit=EINV_BATCH_SIZE)
+    for einv in einv_docs:
+        if time.time() - st_time > SWEEP_TIME_BUDGET:
+            print(f"Time Budget of {SWEEP_TIME_BUDGET} seconds Used hence Stopping")
+            return
+        try:
+            print(f"Trying to Generate eInvoice for Sales Invoice: {einv.name}")
+            generate_irn(dtype="Sales Invoice", dname=einv.name)
+        except JobTimeoutException:
+            raise
+        except requests.RequestException as e:
+            # The Charteredinfo URL holds the ASP password, and the exception text holds the
+            # URL, so log only the exception type (#23).
+            frappe.db.rollback()
+            frappe.log_error(f"Request to ASP failed: {type(e).__name__}", EINV_FAILURE_TITLE + einv.name)
+        except Exception as e:
+            frappe.db.rollback()
+            frappe.log_error(f"{short_error(e)}\n\n{frappe.get_traceback()}", EINV_FAILURE_TITLE + einv.name)
+        frappe.db.commit()
+
+
+def _recent_einvoice_failures():
+    """Invoice names whose eInvoice failed within the last EINV_RETRY_AFTER_HOURS."""
+    cutoff = add_to_date(now_datetime(), hours=-EINV_RETRY_AFTER_HOURS)
+    titles = frappe.get_all("Error Log", pluck="method",
+        filters={"method": ["like", EINV_FAILURE_TITLE + "%"], "creation": [">", cutoff]})
+    return list({title[len(EINV_FAILURE_TITLE):] for title in titles})
 
 
 def make_eway_bill_for_docs():
@@ -190,15 +218,22 @@ def submit_live_einvoice_whitebooks(dtype, dname):
 # ---------------------------------------------------------------------------
 
 
-def _find_pending_einvoice_docs(einv_date):
-    """Same query make_einvoice_for_docs() already uses, factored out so
-    both the live sweep and the backlog bulk path find the same candidate
-    set — see the design's Premise on the two paths agreeing on
-    eligibility."""
+def _find_pending_einvoice_docs(einv_date, exclude=None, limit=None):
+    """Submitted Sales Invoices still missing an IRN, newest first. Shared by the live
+    sweep and the backlog bulk path, so both paths agree on eligibility.
+
+    Unregistered (B2C) invoices never get an IRN, so they are filtered here in SQL and
+    not by einv_needed() per row. IFNULL keeps einv_needed()'s rule that a blank
+    gst_category still needs an eInvoice."""
+    values = {"einv_date": einv_date, "exclude": tuple(exclude or ()), "limit": limit}
     query = """SELECT name, posting_date FROM `tabSales Invoice` WHERE docstatus = 1 AND
         (irn IS NULL OR ack_no IS NULL OR ack_date IS NULL) AND
-        posting_date >= %(einv_date)s ORDER BY posting_date DESC, name DESC"""
-    return frappe.db.sql(query, {"einv_date": einv_date}, as_dict=1)
+        IFNULL(gst_category, '') != 'Unregistered' AND
+        posting_date >= %(einv_date)s{name_filter} ORDER BY posting_date DESC, name DESC{limit}"""
+    return frappe.db.sql(query.format(
+        name_filter=" AND name NOT IN %(exclude)s" if exclude else "",
+        limit=" LIMIT %(limit)s" if limit else "",
+    ), values, as_dict=1)
 
 
 def _current_environment():

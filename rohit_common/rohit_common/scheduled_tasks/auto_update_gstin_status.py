@@ -6,7 +6,7 @@ from __future__ import unicode_literals
 import frappe
 import time
 from frappe.utils import flt
-from frappe.utils.background_jobs import enqueue
+from ...utils.background_doc_processing import enqueue_once
 from ..india_gst_api.gst_public_api import search_gstin_whitebooks
 from ..validations.address import validate_gstin_from_portal, is_gstin_validation_disabled
 
@@ -14,7 +14,8 @@ COMMIT_EVERY = 50
 
 
 def enqueue_gstin_update():
-    enqueue(execute, queue="long", timeout=7200)
+    enqueue_once("rohit_common.rohit_common.scheduled_tasks.auto_update_gstin_status.execute",
+                 queue="long", timeout=7200)
 
 
 def execute():
