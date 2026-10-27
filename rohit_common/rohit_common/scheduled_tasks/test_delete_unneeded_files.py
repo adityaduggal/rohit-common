@@ -10,7 +10,7 @@ import frappe
 from rohit_common.utils.query_guard import assert_max_queries
 from rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files import check_correct_folders
 
-TEST_FILE_NAMES = ["test-n1-root", "test-n1-child"]
+TEST_FILE_NAMES = ["test-n1-root", "test-n1-child", "test-n1-grandchild"]
 
 
 class TestDeleteUnneededFiles(unittest.TestCase):
@@ -67,6 +67,13 @@ class TestDeleteUnneededFiles(unittest.TestCase):
 		with assert_max_queries(expected_ceiling, test_case=self):
 			check_correct_folders()
 
+	def test_check_correct_folders_no_writes_when_unchanged(self):
+		"""#22: when the tree and the folder sizes did not change, the hourly job makes a fixed
+		number of reads (tree, folders, sizes) and a commit, and no writes."""
+		check_correct_folders()
+		with assert_max_queries(5, test_case=self):
+			check_correct_folders()
+
 	def test_check_correct_folders_propagates_archive_flag_from_parent(self):
 		self.root.important_document_for_archive = 1
 		self.root.save(ignore_permissions=True)
@@ -77,6 +84,22 @@ class TestDeleteUnneededFiles(unittest.TestCase):
 		self.assertEqual(
 			frappe.db.get_value("File", self.child.name, "important_document_for_archive"), 1
 		)
+
+	def test_check_correct_folders_propagates_archive_flag_to_all_levels_in_one_run(self):
+		grandchild = frappe.get_doc({
+			"doctype": "File",
+			"file_name": "test-n1-grandchild",
+			"is_folder": 1,
+			"folder": self.child.name,
+			"is_private": 1,
+		}).insert(ignore_permissions=True)
+		self.root.important_document_for_archive = 1
+		self.root.save(ignore_permissions=True)
+		frappe.db.commit()
+
+		check_correct_folders()
+
+		self.assertEqual(frappe.db.get_value("File", grandchild.name, "important_document_for_archive"), 1)
 
 	def test_check_correct_folders_handles_root_folder_with_no_parent(self):
 		"""Regression test for the pre-existing bug where a root folder (no

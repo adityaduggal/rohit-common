@@ -1,14 +1,16 @@
 #  Copyright (c) 2021. Rohit Industries Group Private Limited and Contributors.
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
+import json
 import frappe
 import requests
 timeout = 5
 
+
 def get_login_details():
     base_link = ""
     auth_header = ""
-    rset = frappe.get_doc("Rohit Settings", "Rohit Settings")
+    rset = frappe.get_cached_doc("Rohit Settings")
     if rset.api_key:
         auth_header = {"Authorization": "token " + rset.api_key + ":" + rset.api_secret}
         base_link = rset.erpnext_app_base_link
@@ -18,38 +20,22 @@ def get_login_details():
 
 
 def get_dt(dt, dt_name=None, fields_list=None, filters=None):
-    # filters is list of list
+    """
+    Returns the JSON from the ERP's /api/resource for `dt`, or None when the ERP API is not set.
+    Raises requests.HTTPError on an error status and ValueError when the body is not JSON.
+    `filters` is a list of lists.
+    """
     base_url, auth_header = get_login_details()
-    if base_url != "":
-        fd_lnk = ""
-        dtn_lnk = ""
-        f_lnk = ""
-        if filters:
-            if not fields_list:
-                f_lnk += "?filters=["
-            else:
-                f_lnk += "&filters=["
-            for fd in filters:
-                f_lnk += "["
-                for fdn in fd:
-                    if isinstance(fdn, int):
-                        f_lnk += str(fdn) + ", "
-                    else:
-                        f_lnk += '"' + str(fdn) + '", '
-                f_lnk = f_lnk[:-2] + "], "
-            f_lnk = f_lnk[:-2] + "]"
-        if dt_name:
-            dtn_lnk += "/" + dt_name
-        if fields_list:
-            fd_lnk = "?fields=["
-            for fd in fields_list:
-                if isinstance(fd, int):
-                    fd_lnk += fd + ", "
-                else:
-                    fd_lnk += '"' + fd + '", '
-            fd_lnk = fd_lnk[:-2] + "]"
-        link = base_url + "/api/resource/" + dt + dtn_lnk + fd_lnk + f_lnk
-        r = requests.get(url=link, headers=auth_header, timeout=timeout)
-        return r.json()
-    else:
+    if not base_url:
         return None
+    link = base_url + "/api/resource/" + dt
+    if dt_name:
+        link += "/" + dt_name
+    params = {}
+    if fields_list:
+        params["fields"] = json.dumps(fields_list)
+    if filters:
+        params["filters"] = json.dumps(filters)
+    r = requests.get(url=link, headers=auth_header, params=params, timeout=timeout)
+    r.raise_for_status()
+    return r.json()

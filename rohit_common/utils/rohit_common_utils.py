@@ -149,27 +149,21 @@ def check_system_manager(user):
 
 def rebuild_tree(doctype, parent_field, group_field):
     """
-    Rebuilds nested-set lft/rgt values for every row of `doctype`.
-
-    Previously this issued one recursive SQL SELECT per group node plus one
-    UPDATE per row - O(N) queries for an N-row tree. It now fetches the whole
-    table in a single query, walks the same parent-child algorithm in memory,
-    and writes every lft/rgt update in a small number of batched multi-row
-    UPDATEs (chunked to keep individual statements a reasonable size).
-
-    Also fixes a pre-existing bug: for a root-level GROUP node, the previous
-    version discarded rebuild_group()'s return value and never advanced `lft`
-    for the next root, so multiple root-level groups ended up with
-    overlapping lft/rgt ranges. This version threads the return value through.
+    Rebuilds nested-set lft/rgt values for every row of `doctype` from one read,
+    in memory. Only the rows whose lft/rgt changed are written, because the File
+    tree is rebuilt every hour and a full rewrite locks every row (#22).
     """
     all_rows = frappe.db.sql(
-        "SELECT name, `{group_field}` AS group_flag, `{parent_field}` AS parent FROM `tab{doctype}`".format(
+        """SELECT name, lft, rgt, `{group_field}` AS group_flag, `{parent_field}` AS parent
+        FROM `tab{doctype}`""".format(
             group_field=group_field, parent_field=parent_field, doctype=doctype,
         ),
         as_dict=1,
     )
     children_by_parent = {}
+    current = {}
     for row in all_rows:
+        current[row.name] = (row.lft, row.rgt)
         children_by_parent.setdefault(row.parent or "", []).append(row)
 
     updates = {}  # name -> (lft, rgt)
@@ -183,7 +177,6 @@ def rebuild_tree(doctype, parent_field, group_field):
                 right += 2
         for row in siblings:
             if row.group_flag == 1:
-                print(f"Updating Groups for {row.name}")
                 # The child returns its own rgt, so the next free number is one past it
                 right = _rebuild_group(row.name, right) + 1
         updates[parent] = (left, right)
@@ -198,7 +191,8 @@ def rebuild_tree(doctype, parent_field, group_field):
             updates[r.name] = (lft, lft + 1)
             lft += 2
 
-    _apply_batched_lft_rgt_updates(doctype, updates)
+    changed = {name: lft_rgt for name, lft_rgt in updates.items() if current.get(name) != lft_rgt}
+    _apply_batched_lft_rgt_updates(doctype, changed)
 
 
 def _apply_batched_lft_rgt_updates(doctype, updates, chunk_size=500):

@@ -18,6 +18,8 @@ SUBMIT_BATCH_SIZE = 200
 EINV_BATCH_SIZE = 100
 EINV_FAILURE_TITLE = "eInvoice Generation Failed for "
 EINV_RETRY_AFTER_HOURS = 24
+UNPOSTED_BATCH_SIZE = 100
+UNPOSTED_FAILURE_TITLE = "Unposted Invoice Reset Failed for "
 
 
 def enq_inv_sub():
@@ -38,24 +40,28 @@ def enq_einv_create():
 
 def get_unposted_invoices():
     """
-    Gets a list of invoices which are not posted in the General Ledger and also the ones
-    not posted in Stock Ledger
+    Cancels the submitted Sales Invoices that have no GL Entry and makes them Draft and
+    marked to submit again, so the 15 min submit sweep posts them. At most
+    UNPOSTED_BATCH_SIZE invoices per run, oldest first.
     """
-    gl_not_posted = frappe.db.sql("""SELECT si.name, si.creation FROM `tabSales Invoice` si
-        WHERE si.base_grand_total > 0 AND si.docstatus = 1 AND si.name NOT IN (SELECT gle.voucher_no
+    gl_not_posted = frappe.db.sql("""SELECT si.name FROM `tabSales Invoice` si
+        WHERE si.base_grand_total > 0 AND si.docstatus = 1 AND NOT EXISTS (SELECT 1
         FROM `tabGL Entry` gle WHERE gle.voucher_type = 'Sales Invoice'
-        AND gle.voucher_no = si.name) ORDER BY si.creation""", as_dict=1)
+        AND gle.voucher_no = si.name) ORDER BY si.creation LIMIT %(limit)s""",
+        {"limit": UNPOSTED_BATCH_SIZE}, as_dict=1)
     for un_si in gl_not_posted:
-        # Bug fix: un_si is a _dict row (name, creation), not a document name. Passing a
-        # dict as the `name` arg makes frappe.get_doc() construct a new unsaved in-memory
-        # document instead of loading the real Sales Invoice, so sid.cancel() would operate
-        # on the wrong object. Use un_si.name to load the actual document.
-        sid = frappe.get_doc("Sales Invoice", un_si.name)
-        sid.cancel()
-        frappe.db.set_value("Sales Invoice", un_si.name, "docstatus", 0)
-        frappe.db.set_value("Sales Invoice", un_si.name, "set_posting_time", 1)
-        frappe.db.set_value("Sales Invoice", un_si.name, "marked_to_submit", 1)
-        print(f"SI# {un_si.name} not Posted in General Ledger hence Made Draft")
+        try:
+            frappe.get_doc("Sales Invoice", un_si.name).cancel()
+            frappe.db.set_value("Sales Invoice", un_si.name,
+                {"docstatus": 0, "set_posting_time": 1, "marked_to_submit": 1})
+            frappe.db.commit()
+            print(f"SI# {un_si.name} not Posted in General Ledger hence Made Draft")
+        except JobTimeoutException:
+            raise
+        except Exception as e:
+            frappe.db.rollback()
+            frappe.log_error(f"{short_error(e)}\n\n{frappe.get_traceback()}", UNPOSTED_FAILURE_TITLE + un_si.name)
+            frappe.db.commit()
 
 
 def get_docs_to_submit():

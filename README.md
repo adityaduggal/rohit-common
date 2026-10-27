@@ -61,8 +61,7 @@ rohit_common/
     │   │   ├── auto_refresh_gstin_auth_code.py # GST token renewal
     │   │   ├── auto_update_from_erp.py# Sync shipping bills from remote ERP
     │   │   ├── auto_update_gstin_status.py # Re-validate active GSTINs
-    │   │   ├── delete_unneeded_files.py    # Orphan/stale file purge tasks
-    │   │   └── email_queue_delete.py  # Outbound mail queue purge
+    │   │   └── delete_unneeded_files.py    # Orphan/stale file purge tasks
     │   └── validations/               # Document event logic (validate, autoname)
     │       ├── address.py             # Address details & GSTIN verification hooks
     │       ├── asset.py               # Auto-naming, depreciation scheduling hooks

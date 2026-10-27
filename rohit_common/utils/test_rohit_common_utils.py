@@ -136,6 +136,21 @@ class TestRebuildTree(unittest.TestCase):
 		root_b_range = set(range(root_b_lft, root_b_rgt + 1))
 		self.assertEqual(root_a_range & root_b_range, set())
 
+	def test_second_rebuild_writes_nothing(self):
+		"""#22: the hourly rebuild must not rewrite rows whose lft/rgt did not change."""
+		rebuild_tree(doctype="File", parent_field="folder", group_field="is_folder")
+		statements = []
+		original_sql = frappe.db.sql
+
+		def recording_sql(query, *args, **kwargs):
+			statements.append(str(query))
+			return original_sql(query, *args, **kwargs)
+
+		with patch.object(frappe.db, "sql", side_effect=recording_sql):
+			rebuild_tree(doctype="File", parent_field="folder", group_field="is_folder")
+
+		self.assertEqual([q for q in statements if q.lstrip().upper().startswith("UPDATE")], [])
+
 
 class TestAddressContactHooks(unittest.TestCase):
 	"""

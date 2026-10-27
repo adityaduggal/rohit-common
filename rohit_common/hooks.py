@@ -210,7 +210,7 @@ scheduler_events = {
         "rohit_common.rohit_common.scheduled_tasks.auto_refresh_gstin_auth_code.execute"
     ],
     "daily": [
-        "rohit_common.rohit_common.scheduled_tasks.auto_update_from_erp.update_export_invoices",
+        "rohit_common.rohit_common.scheduled_tasks.auto_update_from_erp.enqueue_update_export_invoices",
         "rohit_common.rohit_common.scheduled_tasks.revoke_locked_doc_shares.execute",
         # Orphan Address/Contact Dynamic Links, once a day instead of on each save (#20)
         "rohit_common.utils.rohit_common_utils.sanitize_dynamic_link",
@@ -224,7 +224,6 @@ scheduler_events = {
         "rohit_common.rohit_common.scheduled_tasks.auto_delete_version.enqueue_deletion",
         "rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files.execute",
     ],
-    "monthly": ["rohit_common.rohit_common.scheduled_tasks.email_queue_delete.execute"],
 }
 
 # Testing

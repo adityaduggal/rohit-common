@@ -8,12 +8,8 @@
 from __future__ import unicode_literals
 import time
 import frappe
-from frappe.utils import flt
-from frappe.utils.fixtures import sync_fixtures
 from ...utils.rohit_common_utils import rebuild_tree, apply_batched_field_update
 from rohit_common.core.file import check_file_availability, delete_file_dt, check_and_move_file, correct_file_name_url
-
-sync_fixtures()
 
 
 def execute():
@@ -50,7 +46,6 @@ def execute():
     frappe.db.commit()
     print("Checking for Archive Folders and Making All Files Under them Archive Files")
     time.sleep(2)
-    archived = 0
     arch_folders = frappe.db.sql("""SELECT name, lft, rgt FROM `tabFile` WHERE is_folder=1
     AND important_document_for_archive=1 AND is_home_folder=0 AND is_attachments_folder=0""", as_dict=1)
     # Single query for all descendant files across every archive folder's lft/rgt range,
@@ -134,7 +129,6 @@ def execute():
     WHERE file_available_on_server = 0 AND is_folder=0""", as_dict=1)
     print(f"Total Non Available Files = {len(non_validated_files)}")
     time.sleep(1)
-    non_avail_files = 0
     non_avail_dt = 0
 
     # Pre-fetch existence of every referenced (attached_to_doctype, attached_to_name) in one
@@ -202,7 +196,6 @@ def execute():
     print(f"Total Time Taken for Auto Deletion of Files {del_time - mark_time} seconds")
     print(f"Total No of Files Made Available = {avail_count}")
     print(f"Total No of Files Attached to Unavailable Documents = {non_avail_dt}")
-    print(f"Total No of Files Not Available on Server = {non_avail_files}")
     print(f"Total Time Take for Making Files Available = {avail_time - mark_time} seconds")
     print(f"Total Time Taken {tot_time} seconds")
 
@@ -227,20 +220,22 @@ def check_correct_folders():
     folder_size_map = {row.folder: (row.total_size or 0) for row in folder_size_rows}
 
     # Collect updates in memory and write them in batched CASE-based UPDATEs
-    # below, instead of one frappe.db.set_value() call per folder.
+    # below, instead of one frappe.db.set_value() call per folder. Each walk also
+    # updates its map, so a change reaches every level in one run, and a run with
+    # nothing to change writes nothing (#22).
     archive_updates = {}
+    for fd in reversed(folders):  # parents first
+        if fd.folder and folder_archive_map.get(fd.folder) == 1 and fd.important_document_for_archive != 1:
+            archive_updates[fd.name] = 1
+            folder_archive_map[fd.name] = 1
     size_updates = {}
-    for fd in folders:
-        if fd.folder:
-            parent_archive = folder_archive_map.get(fd.folder)
-            if parent_archive == 1 and fd.important_document_for_archive != 1:
-                archive_updates[fd.name] = parent_archive
-        # NOTE: previously this was computed only inside `if fd.folder:`, which left `fd_size`
-        # referencing a stale value from a prior iteration (or undefined on the first iteration)
-        # for root folders. Computing it unconditionally for every folder fixes that.
+    for fd in folders:  # children first
         fd_size = folder_size_map.get(fd.name, 0)
         if fd_size != fd.file_size:
             size_updates[fd.name] = fd_size
+            if fd.folder:
+                # The parent's total counted this folder's old size
+                folder_size_map[fd.folder] = folder_size_map.get(fd.folder, 0) + fd_size - (fd.file_size or 0)
             print(f"Updating Folder: {fd.name} with Actual File Size = {fd_size} old size {fd.file_size}")
     apply_batched_field_update("File", "important_document_for_archive", archive_updates)
     apply_batched_field_update("File", "file_size", size_updates)

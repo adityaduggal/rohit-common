@@ -8,8 +8,11 @@
 from __future__ import unicode_literals
 import time
 import frappe
-from frappe.utils import flt
+from frappe.utils import cint
 from ...utils.background_doc_processing import enqueue_once
+
+DEFAULT_DAYS_TO_KEEP = 30
+VERSION_DELETE_BATCH = 5000
 
 
 def enqueue_deletion():
@@ -18,44 +21,56 @@ def enqueue_deletion():
 
 
 def execute():
-    st_time = time.time()
+    """
+    Deletes Versions older than Max Days to Keep Version, except for the doctypes listed in
+    Auto Delete from Version, which use their own Days to Keep.
+    """
     rset = frappe.get_single("Rohit Settings")
-    max_days = flt(rset.max_days_to_keep_version)
-    dt_list = []
+    max_days = cint(rset.max_days_to_keep_version) or DEFAULT_DAYS_TO_KEEP
+    listed_days = {}
     for row in rset.auto_delete_from_version:
-        dt_list.append(row.document_type)
-    if max_days == 0:
-        max_days = 30
+        if row.document_type:
+            listed_days[row.document_type] = max(cint(row.days_to_keep), 1)
+    delete_old_versions(max_days, listed_days)
 
-    # First delete all items except for the ones in table which are above the max days
-    query = """SELECT name, creation, ref_doctype, docname FROM `tabVersion` WHERE ref_doctype NOT IN %s
-    AND creation <= (DATE_SUB(CURDATE(), INTERVAL %s DAY))""" % (tuple(dt_list), max_days)
-    un_regulated_version = frappe.db.sql(query, as_dict=1)
-    deleted_0 = 0
-    deleted_1 = 0
-    for d in un_regulated_version:
-        print(f"Deleting Versions for All Un-Listed Doctypes older than {max_days} Days")
-        deleted_0 += 1
-        frappe.delete_doc("Version", d.name, for_reload=1)
-        if deleted_0 % 2000 == 0 and deleted_0 > 0:
-            frappe.db.commit()
-            print(f"Committing After {deleted_0} deletions. Time Elapsed {int(time.time() - st_time)} seconds")
-    for row in rset.auto_delete_from_version:
-        # dt_conds = ""
-        # if row.doctype_conditions:
-        #    dt_conds = " AND %s" % row.doctype_conditions
 
-        max_days = flt(row.days_to_keep) if flt(row.days_to_keep) > 0 else 1
-        print(f"Deleting Versions for {row.document_type} older than {max_days} Days")
-        query = """SELECT name, creation, ref_doctype, docname FROM `tabVersion` WHERE ref_doctype = '%s'
-        AND creation <= (DATE_SUB(CURDATE(), INTERVAL %s DAY))""" % (row.document_type, max_days)
-        reg_version = frappe.db.sql(query, as_dict=1)
-        for d in reg_version:
-            deleted_1 += 1
-            frappe.delete_doc("Version", d.name, for_reload=1)
-            if deleted_1  % 2000 == 0 and deleted_1 > 0:
-                frappe.db.commit()
-                print(f"Committing After {deleted_1} deletions. Time Elapsed {int(time.time() - st_time)} seconds")
-    tot_time = int(time.time() - st_time)
-    print(f"Total Versions Deleted = {deleted_0 + deleted_1}")
-    print(f"Total Time Taken = {tot_time} seconds")
+def delete_old_versions(max_days, listed_days):
+    """
+    `listed_days` is {doctype: days to keep}. Versions of every other doctype are kept for
+    `max_days`. Returns the number of Versions deleted.
+    """
+    st_time = time.time()
+    print(f"Deleting Versions for All Un-Listed Doctypes older than {max_days} Days")
+    deleted = _delete_versions(max_days, exclude=list(listed_days))
+    for doctype, days in listed_days.items():
+        print(f"Deleting Versions for {doctype} older than {days} Days")
+        deleted += _delete_versions(days, ref_doctype=doctype)
+    print(f"Total Versions Deleted = {deleted}")
+    print(f"Total Time Taken = {int(time.time() - st_time)} seconds")
+    return deleted
+
+
+def _delete_versions(days, ref_doctype=None, exclude=None):
+    """
+    Deletes the matching Versions in batches of VERSION_DELETE_BATCH and commits after each
+    batch, so one run does not hold a lock on the whole table. Returns the number deleted.
+    """
+    conditions = ["creation <= DATE_SUB(CURDATE(), INTERVAL %(days)s DAY)"]
+    values = {"days": days}
+    if ref_doctype:
+        conditions.append("ref_doctype = %(ref_doctype)s")
+        values["ref_doctype"] = ref_doctype
+    if exclude:
+        conditions.append("(ref_doctype IS NULL OR ref_doctype NOT IN %(exclude)s)")
+        values["exclude"] = tuple(exclude)
+    query = "DELETE FROM `tabVersion` WHERE {conditions} LIMIT {limit}".format(
+        conditions=" AND ".join(conditions), limit=VERSION_DELETE_BATCH)
+
+    deleted = 0
+    while True:
+        frappe.db.sql(query, values)
+        batch_count = cint(frappe.db._cursor.rowcount)
+        frappe.db.commit()
+        deleted += batch_count
+        if batch_count < VERSION_DELETE_BATCH:
+            return deleted
