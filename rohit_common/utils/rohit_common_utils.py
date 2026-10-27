@@ -189,7 +189,8 @@ def rebuild_tree(doctype, parent_field, group_field):
         for row in siblings:
             if row.group_flag == 1:
                 print(f"Updating Groups for {row.name}")
-                right = _rebuild_group(row.name, right)
+                # The child returns its own rgt, so the next free number is one past it
+                right = _rebuild_group(row.name, right) + 1
         updates[parent] = (left, right)
         return right
 
