@@ -8,6 +8,7 @@
   "gst_username",
   "authorization_token",
   "validity_of_token",
+  "whitebooks_txn",
   "cb0",
   "api_access_authorized",
   "last_otp_sent",
@@ -77,6 +78,14 @@
    "read_only": 1
   },
   {
+   "description": "WhiteBooks session id returned by OTP Request. It is sent as the txn header on every GSTR call for this GSTIN.",
+   "fieldname": "whitebooks_txn",
+   "fieldtype": "Data",
+   "label": "WhiteBooks Txn",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
    "depends_on": "eval: doc.api_access_authorized !== 1",
    "fieldname": "validate_otp",
    "fieldtype": "Button",
@@ -104,7 +113,7 @@
   }
  ],
  "istable": 1,
- "modified": "2021-07-22 10:34:40.061168",
+ "modified": "2026-10-27 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "GST Registration Details",

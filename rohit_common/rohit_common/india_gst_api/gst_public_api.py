@@ -69,14 +69,21 @@ def track_return_whitebooks(gstin, fiscal_year, type_of_return=None):
 def get_arn_status(ret_status_json, type_of_return, ret_period):
     arn, status, dof, mof = "", "", "", ""
     found = 0
-    efiled_list = ret_status_json.get('EFiledlist')
+    if "status_cd" in ret_status_json and str(ret_status_json.get("status_cd")) != "1":
+        frappe.throw(f"Return tracking for {type_of_return} {ret_period} failed: "
+                     f"{ret_status_json.get('status_desc')}", title="WhiteBooks Return Tracking Error")
+    # WhiteBooks wraps the payload in "data" (as gst_return_status.py reads it); a bare
+    # payload is still accepted.
+    payload = ret_status_json.get("data") if isinstance(ret_status_json.get("data"), dict) else ret_status_json
+    efiled_list = payload.get('EFiledlist')
     if efiled_list:
         for d in efiled_list:
             if type_of_return == d.get("rtntype") and ret_period == d.get("ret_prd"):
                 found = 1
                 arn = d.get("arn")
                 status = d.get("status")
-                dof = getdate(d.get("dof"))
+                # GSTN sends dof as DD-MM-YYYY
+                dof = getdate(d.get("dof"), parse_day_first=True)
                 mof = d.get("mof")
                 break
         if found != 1:

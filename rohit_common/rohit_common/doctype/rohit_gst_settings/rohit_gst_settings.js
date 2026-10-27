@@ -12,17 +12,17 @@ frappe.ui.form.on('GST Registration Details', {
                 },
                 callback: function(r){
                     if (!r.exc){
-                        console.log("Hello");
+                        frm.reload_doc();
                     }
                 }
             });
         } else {
-            frappe.msgprint("For Row# " + child.idx + "and GSTIN# " + child.gst_registration_number + " API Access is Already there so Need for OTP")
+            frappe.msgprint("For Row# " + child.idx + " and GSTIN# " + child.gst_registration_number + " API Access is Already there so No Need for OTP")
         }
     },
     validate_otp: function(frm, dt, dn){
         var child = locals[dt][dn];
-        if (child.api_access_authorized !== 1 && (child.otp !== null || child.otp !== "")){
+        if (child.api_access_authorized !== 1 && child.otp){
             frappe.call({
                 method: "rohit_common.rohit_common.india_gst_api.gst_api.authenticate_gst_otp",
                 args: {
@@ -32,7 +32,7 @@ frappe.ui.form.on('GST Registration Details', {
                 },
                 callback: function(r){
                     if (!r.exc){
-                        console.log("Hello");
+                        frm.reload_doc();
                     }
                 }
             });

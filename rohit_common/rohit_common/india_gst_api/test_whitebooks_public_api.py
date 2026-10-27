@@ -143,7 +143,7 @@ class TestTrackReturnWhitebooks(unittest.TestCase):
         """Guards the shared-parser assumption: get_arn_status() (vendor-
         agnostic, reused unchanged) must still work against whatever
         track_return_whitebooks() returns — same EFiledlist shape."""
-        mock_getdate.side_effect = lambda v: v
+        mock_getdate.side_effect = lambda v, **kwargs: v
         _configure_wb(mock_wb)
         mock_requests.get.return_value = _fake_response(
             200,

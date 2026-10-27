@@ -1,279 +1,185 @@
 #  Copyright (c) 2022. Rohit Industries Group Private Limited and Contributors.
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
+"""
+WhiteBooks.in GST taxpayer API: the per-GSTIN OTP session, and GSTR1 / GSTR2A /
+GSTR2B downloads. The TaxPro/Charteredinfo version put the ASP password in the
+query string. It was replaced 2026-10-27.
+
+CONFIRMED from WhiteBooks' "WB-GST-API" Postman collection (GST API.postman_collection.zip):
+- Same product, base URL (no path prefix) and client_id/client_secret pair as the
+  Public GST family (whitebooks_provider.PUBLIC_GST).
+- Every call sends the headers client_id, client_secret, gst_username, state_cd and
+  ip_address. Every call except /authentication/otprequest also sends txn.
+- Every call takes the registered account `email` as a query param.
+- Paths: /authentication/{otprequest,authtoken,refreshtoken},
+  /gstr1/<section>?gstin=&retperiod=, /gstr2a/<section>?gstin=&retperiod=,
+  /gstr2b/all?gstin=&rtnprd=&filenum=.
+
+UNVERIFIED ASSUMPTIONS (the collection has no 200 response bodies; confirm them on
+the first sandbox call, then remove this note):
+1. /authentication/otprequest returns the session id as header.txn (or a top-level
+   txn). See _extract_txn().
+2. Data calls return {"status_cd": "1", "data": {<section key>: [...]}}, which is
+   the same envelope /public/rettrack uses. See _unwrap().
+3. "No data for this section/period" comes back as status_cd "0" with one of
+   NO_DATA_ERROR_CODES in error.error_cd. See _error_code().
+Every failure message includes the raw response, so a wrong guess shows its real
+shape on the first live call.
+"""
 import datetime
+
 import frappe
 import requests
-from frappe.utils import flt
-from .common import get_gsp_details, get_api_version
-TIMEOUT = 7
+from frappe.utils import cint, get_datetime, now_datetime
+
+from . import whitebooks_provider
+
+TIMEOUT = 30
+API_NAME = whitebooks_provider.PUBLIC_GST
+REGISTRATION_DOCTYPE = "GST Registration Details"
+# GSTN issues the taxpayer auth token for 6 hours.
+TOKEN_VALIDITY_MINS = 360
+# UNVERIFIED (3) - GSTN "no invoices/documents found" error codes.
+NO_DATA_ERROR_CODES = frozenset({"RET13510", "RET13509", "RET11416", "RET11417", "RET2B1016"})
+# Errors after which a refresh can't recover the session. The user must request
+# a new OTP. Carried over from the TaxPro implementation.
+REVOKE_ACCESS_ERROR_CODES = frozenset({"AUTH4037", "RET11402", "SWEB9033", "AUTH4033", "GSP102"})
 
 
-def get_gstr1(gstin, ret_period, action):
-    """
-    Returns JSON for GSTR1 for a given GSTIN, Return Period and action is Required
-    Action is basically Sub-type like B2B etc for Returns
-    """
-    api = "gstr1"
-    auth_token = get_auth_token(gstin)
-    url = get_gst_url(api, action, gstin) + "&authtoken=" + auth_token + "&ret_period=" + ret_period
-    resp = get_gst_response(url=url, type_of_req="get")
-    if flt(resp.get("status_cd")) == 1:
-        pass
-    elif resp.get(action.lower(), None) is not None:
-        pass
-    elif flt(resp.get("status_cd")) == 0:
-        resp = []
-    else:
-        frappe.throw(f"Some Error in Response with Error Message = {resp} URL Used= {url}")
-    return resp
+def get_gstr1(gstin: str, ret_period: str, sections: dict) -> dict:
+    """Download several GSTR1 sections. See _get_return_sections()."""
+    return _get_return_sections("gstr1", gstin, ret_period, sections)
 
 
-def get_gstr2a(gstin, ret_period, action):
-    """
-    Returs JSON for GSTR2A for a GSTIN, Return Period and Action is also required
-    Action is basically Sub-type like B2B etc for Returns
-    """
-    api = "gstr2a"
-    auth_token = get_auth_token(gstin)
-    url = get_gst_url(api, action, gstin) + "&authtoken=" + auth_token + "&ret_period=" + ret_period
-    resp = get_gst_response(url=url, type_of_req="get")
-    if flt(resp.get("status_cd")) == 1:
-        pass
-    elif resp.get(action.lower(), None) is not None:
-        pass
-    elif flt(resp.get("status_cd")) == 0:
-        resp = []
-    else:
-        frappe.throw(f"Some Error in Response with Error Message = {resp} URL Used= {url}")
-    return resp
+def get_gstr2a(gstin: str, ret_period: str, sections: dict) -> dict:
+    """Download several GSTR2A sections. See _get_return_sections()."""
+    return _get_return_sections("gstr2a", gstin, ret_period, sections)
 
 
-def get_gstr2b(gstin, ret_period, action, file_num=None):
-    """
-    Returns JSON for GSTR2B for GSTIN, Return Period and Action is Required.
-    Action is basically Sub-type like B2B etc for Returns
-    """
+def get_gstr2b(gstin: str, ret_period: str, file_num: str = None) -> dict:
+    """The full GSTR2B response. Callers read response["data"]["gendt"/"docdata"]."""
+    reg = get_registration(gstin)
+    assert_session_active(reg)
+    params = {"gstin": gstin, "rtnprd": ret_period}
     if file_num:
-        file_num_link = "&file_num" + file_num
-    else:
-        file_num_link = ""
-    api = "gstr2b"
-    auth_token = get_auth_token(gstin)
-    url = get_gst_url(api, action, gstin) + "&authtoken=" + auth_token + "&rtnprd=" + ret_period + \
-        "&ret_period=" + ret_period + file_num_link
-    resp = get_gst_response(url=url, type_of_req="get")
-    if resp.get("chksum"):
-        pass
-    else:
-        frappe.throw(f"Some Error in Response with Error Message = {resp} URL Used= {url}")
+        params["filenum"] = file_num
+    resp = _get(_session(reg), "/gstr2b/all", params)
+    if not _is_success(resp):
+        frappe.throw(f"GSTR2B for GSTIN {gstin}, period {ret_period} failed: {_describe(resp)}",
+                     title="WhiteBooks GSTR2B Error")
     return resp
-
-
-def get_gst_response(url, type_of_req):
-    """
-    Based on Type of Request it would do a post or get request for a URL given
-    """
-    if type_of_req == "post":
-        response = requests.post(url=url, timeout=TIMEOUT).json()
-    elif type_of_req == "get":
-        response = requests.get(url=url, timeout=TIMEOUT).json()
-    else:
-        frappe.throw(f"Type of Request {type_of_req} is Not Defined")
-    return response
 
 
 @frappe.whitelist()
 def get_gst_otp(gstin):
-    """
-    Send a request to GST server to send OTP to registered mobile number of a given GST
-    """
-    api = "otp"
-    action = "OTPREQUEST"
-    otp_url = get_gst_url(api=api, action=action, gstin=gstin)
-    res = requests.get(otp_url, timeout=TIMEOUT).json()
-    if flt(res.get("status_cd")) == 1:
-        frappe.msgprint("OTP Sent Successfully, Please enter the OTP sent to RMN")
-    else:
-        frappe.msgprint(f"OTP Generation Failed. Please try again later. Error Message is {res} \
-            and OTP URL {otp_url}")
+    """Ask GSTN to send an OTP to the GSTIN's registered mobile/email. This starts
+    a new WhiteBooks session (txn), so the old session is no longer authorized."""
+    frappe.has_permission("Rohit GST Settings", "write", throw=True)
+    gstin = _require_str("GSTIN", gstin)
+    reg = get_registration(gstin)
+    resp = _get(_session(reg, with_txn=False), "/authentication/otprequest", {})
+    if not _is_success(resp):
+        frappe.throw(f"OTP request for GSTIN {gstin} failed: {_describe(resp)}",
+                     title="WhiteBooks OTP Request Failed")
+    txn = _extract_txn(resp)
+    if not txn:
+        frappe.throw(f"WhiteBooks accepted the OTP request for GSTIN {gstin} but returned no txn. "
+                     f"Raw response: {resp}", title="WhiteBooks OTP Response Not Recognised")
+    frappe.db.set_value(REGISTRATION_DOCTYPE, reg.name, {
+        "whitebooks_txn": txn, "otp": "", "api_access_authorized": 0, "authorization_token": ""})
+    frappe.msgprint(f"OTP sent for GSTIN {gstin}. Enter the OTP received on the registered mobile number "
+                    "and click Validate OTP.")
 
 
 @frappe.whitelist()
 def authenticate_gst_otp(gstin, otp, row_id):
-    """
-    To authenticate the OTP received on RMN this is used
-    """
-    api = "otp"
-    action = "AUTHTOKEN"
-    auth_url = get_gst_url(api=api, action=action, gstin=gstin) + "&OTP=" + otp
-    auth_resp = requests.get(url=auth_url, timeout=TIMEOUT)
-    auth_resp = auth_resp.json()
-    if flt(auth_resp.get("status_cd")) == 1:
-        frappe.db.set_value("GST Registration Details", row_id, "last_otp_sent",
-                datetime.datetime.now())
-        update_auth_token(row_name=row_id, auth_token=auth_resp.get("auth_token"))
-        frappe.msgprint(f"Updated the Auth Token. Now API access to {gstin} is Active")
-    else:
-        update_auth_token(row_name=row_id, auth_token="", failed=1)
-        frappe.throw(f"OTP Validation Failed and Error Message = {auth_resp} and Link = {auth_url}")
+    frappe.has_permission("Rohit GST Settings", "write", throw=True)
+    gstin = _require_str("GSTIN", gstin)
+    otp = _require_str("OTP", otp)
+    row_id = _require_str("Row ID", row_id)
+    if not otp.isdigit():
+        frappe.throw(f"OTP must contain only digits. Received {otp!r}", title="Invalid OTP")
+    reg = get_registration(gstin)
+    if reg.name != row_id:
+        frappe.throw(f"Row {row_id} is not the Rohit GST Settings row for GSTIN {gstin}",
+                     title="GSTIN and Row Mismatch")
+    if not reg.whitebooks_txn:
+        frappe.throw(f"No OTP was requested for GSTIN {gstin}. Click Request OTP first.",
+                     title="OTP Not Requested")
+    resp = _get(_session(reg), "/authentication/authtoken", {"otp": otp})
+    if not _is_success(resp):
+        frappe.throw(f"OTP validation for GSTIN {gstin} failed: {_describe(resp)}",
+                     title="WhiteBooks OTP Validation Failed")
+    now = now_datetime()
+    frappe.db.set_value(REGISTRATION_DOCTYPE, reg.name, {
+        "api_access_authorized": 1,
+        "authorization_token": _extract_auth_token(resp),
+        "validity_of_token": now + datetime.timedelta(minutes=TOKEN_VALIDITY_MINS),
+        "last_otp_sent": now,
+        "no_of_times_token_updated": 0,
+        "otp": "",
+    })
+    frappe.msgprint(f"API access for GSTIN {gstin} is now active")
 
 
 def check_for_refresh_token(row):
-    """
-    For a row dict would check if the Auth Token is needed to be refreshed for a GSTIN
-    """
-    now_time = datetime.datetime.now()
-    token_time = flt(row.update_token_every_mins)
-    if row.authorization_token and row.api_access_authorized == 1:
-        token_update_time = row.validity_of_token - datetime.timedelta(minutes=360) + \
-            datetime.timedelta(minutes=token_time)
-        if token_update_time < now_time < row.validity_of_token:
-            new_auth_token, error_code = refresh_auth_token(row.gst_registration_number,
-                row.authorization_token)
-            if new_auth_token != "":
-                print(f"Auto Updated Auth Token for {row.gst_registration_number}")
-                update_auth_token(row_name=row.name, auth_token=new_auth_token)
-            else:
-                print(f"Auto Auth Token Update Failed for {row.gst_registration_number}")
-                update_auth_token(row_name=row.name, auth_token="", failed=1, error_code=error_code)
-        elif token_update_time > now_time and row.validity_of_token > now_time:
-            print(f"No Need to Update the Auth Token for {row.gst_registration_number} as Token to \
-                be Updated After {token_update_time}")
-        else:
-            print(f"Auth Token is Expired and hence Need to Generate OTP Again for \
-                {row.gst_registration_number}")
-            update_auth_token(row_name=row.name, auth_token="", failed=1, error_code='AUTH4037')
-    elif row.api_access_authorized != 1:
-        print(f"API Authorization is Unchecked for {row.gst_registration_number}")
-    else:
-        print(f"No API Authorization Token for {row.gst_registration_number}")
+    """Scheduler entry: extend the session for one Rohit GST Settings row before
+    it expires. Failures are logged, not thrown, so one GSTIN's failure does not
+    stop the others."""
+    if cint(row.api_access_authorized) != 1 or not row.whitebooks_txn or not row.validity_of_token:
+        return
+    now = now_datetime()
+    validity = get_datetime(row.validity_of_token)
+    if now >= validity:
+        frappe.db.set_value(REGISTRATION_DOCTYPE, row.name, {"api_access_authorized": 0, "otp": ""})
+        return
+    refresh_after = validity - datetime.timedelta(minutes=TOKEN_VALIDITY_MINS) + \
+        datetime.timedelta(minutes=cint(row.update_token_every_mins))
+    if now < refresh_after:
+        return
+    resp = _get(_session(row), "/authentication/refreshtoken", {})
+    if _is_success(resp):
+        frappe.db.set_value(REGISTRATION_DOCTYPE, row.name, {
+            "validity_of_token": now + datetime.timedelta(minutes=TOKEN_VALIDITY_MINS),
+            "authorization_token": _extract_auth_token(resp) or row.authorization_token,
+            "no_of_times_token_updated": cint(row.no_of_times_token_updated) + 1,
+        })
+        return
+    if _error_code(resp) in REVOKE_ACCESS_ERROR_CODES:
+        frappe.db.set_value(REGISTRATION_DOCTYPE, row.name, {"api_access_authorized": 0, "otp": ""})
+    frappe.log_error(f"GSTIN {row.gst_registration_number}: {_describe(resp)}",
+                     "WhiteBooks GST Token Refresh Failed")
 
 
-def refresh_auth_token(gstin, auth_token):
-    """
-    Tries to refresh the auth token for a given GSTIN and Auth Token
-    """
-    error_code = ""
-    api = "otp"
-    action = "REFRESHTOKEN"
-    ref_url = get_gst_url(api=api, action=action, gstin=gstin) + "&AuthToken=" + auth_token
-    ref_resp = requests.get(url=ref_url, timeout=TIMEOUT).json()
-    if flt(ref_resp.get("status_cd")) == 1:
-        refresh_resp = ref_resp.get("auth_token")
-    else:
-        refresh_resp = ""
-        error = ref_resp.get('error')
-        print(f"Some Error in Refreshing the Auth Token with Error = {ref_resp.get('error')} and \
-            URL being used = {ref_url} and full response is {ref_resp}")
-        error_code = error.get("error_cd")
-    return refresh_resp, error_code
+def get_registration(gstin: str) -> frappe._dict:
+    """The Rohit GST Settings row for a GSTIN, read with one query."""
+    rows = frappe.get_all(
+        REGISTRATION_DOCTYPE,
+        filters={"parenttype": "Rohit GST Settings", "gst_registration_number": gstin},
+        fields=["name", "gst_registration_number", "gst_username", "api_access_authorized",
+                "authorization_token", "validity_of_token", "whitebooks_txn",
+                "no_of_times_token_updated", "update_token_every_mins"],
+    )
+    if not rows:
+        frappe.throw(f"GSTIN {gstin} is not set up in Rohit GST Settings for API access",
+                     title="GSTIN Not Registered for GST API")
+    if len(rows) > 1:
+        frappe.throw(f"GSTIN {gstin} is in Rohit GST Settings {len(rows)} times. Remove the duplicate rows.",
+                     title="Duplicate GSTIN in Rohit GST Settings")
+    reg = rows[0]
+    if not reg.gst_username:
+        frappe.throw(f"GST Username for GSTIN {gstin} is empty in Rohit GST Settings",
+                     title="GST Username Missing")
+    return reg
 
 
-def get_auth_token(gstin):
-    """
-    Gets auth token for a given GSTIN
-    """
-    found = 0
-    r_set = frappe.get_doc("Rohit GST Settings", "Rohit GST Settings")
-    now_time = datetime.datetime.now()
-    new_auth_token = ""
-    for row in r_set.gst_registration_details:
-        if row.gst_registration_number == gstin:
-            # Updates token after this many mins
-            token_update_min = flt(row.update_token_every_mins)
-            token_update_time = row.validity_of_token - datetime.timedelta(minutes=360) + \
-                datetime.timedelta(minutes=token_update_min)
-            found = 1
-            if row.authorization_token and row.api_access_authorized == 1:
-                if token_update_time > now_time and row.validity_of_token > now_time:
-                    new_auth_token = row.authorization_token
-                elif token_update_time < now_time < row.validity_of_token:
-                    new_auth_token, error_code = refresh_auth_token(gstin=gstin,
-                        auth_token=row.authorization_token)
-                    if new_auth_token != "":
-                        update_auth_token(row_name=row.name, auth_token=new_auth_token,
-                            error_code=error_code)
-                    else:
-                        update_auth_token(row_name=row.name, auth_token="", failed=1,
-                            error_code=error_code)
-                        frappe.throw(f"New Auth Token for {gstin} is Empty you might need to \
-                            Generate OTP Again")
-                else:
-                    update_auth_token(row_name=row.name, auth_token="", failed=1,
-                        error_code="AUTH4037")
-                    frappe.throw(f"Auth Token for {gstin} is Expired you might need to \
-                        Generate OTP Again")
-            else:
-                frappe.throw(f"Authorization Needed for {gstin}. Resend OTP and Get Authorization")
-    if found == 0:
-        frappe.throw(f"{gstin} is Not Setup in Rohit GST Settings for API Access")
-    return new_auth_token
-
-
-def update_auth_token(row_name, auth_token, failed=0, error_code=None):
-    """
-    Updates the Auth Token for a Row Name in the GST Registration Details
-    """
-    if not error_code:
-        error_code = ""
-    ecl = ["AUTH4037", "RET11402", "SWEB9033", "AUTH4033", "GSP102"]
-    if failed == 1:
-        # Only Update API Access to zero on certain errors and not all errors
-        frappe.db.set_value("GST Registration Details", row_name, "otp", "")
-        if error_code != "" and error_code in ecl:
-            print("Removing API Access")
-            frappe.db.set_value("GST Registration Details", row_name, "api_access_authorized", 0)
-        else:
-            print(f"Error Code: {str(error_code)} Not in List")
-        frappe.db.commit()
-    else:
-        # Combined into a single query (was two frappe.db.get_value() round trips).
-        auth_access, exist_token_times = frappe.db.get_value(
-            "GST Registration Details", row_name,
-            ["api_access_authorized", "no_of_times_token_updated"],
-        )
-        auth_access = flt(auth_access)
-        exist_token_times = flt(exist_token_times)
-        if auth_access == 1:
-            frappe.db.set_value("GST Registration Details", row_name, "no_of_times_token_updated",
-                exist_token_times + 1)
-        else:
-            frappe.db.set_value("GST Registration Details", row_name, "no_of_times_token_updated",
-                0)
-        frappe.db.set_value("GST Registration Details", row_name, "api_access_authorized", 1)
-        frappe.db.set_value("GST Registration Details", row_name, "authorization_token", auth_token)
-        frappe.db.set_value("GST Registration Details", row_name, "otp", "")
-        frappe.db.set_value("GST Registration Details", row_name, "validity_of_token",
-                            datetime.datetime.now() + datetime.timedelta(minutes=360))
-
-
-def get_gst_url(api, action, gstin):
-    """
-    Gets the URL for a GSTIN api, action and GSTIN
-    """
-    gsp_link, asp_id, asp_pass, gstin_other, sandbox = get_gsp_details(api=api, action=action)
-    username = get_gst_username(gstin=gstin)
-    version, act_type = get_api_version(api)
-    gst_url = gsp_link + "/taxpayerapi/dec/" + version + "/" + act_type + "?action=" + action + \
-        "&aspid=" + asp_id + "&password=" + asp_pass + "&gstin=" + gstin + "&username=" + username
-    return gst_url
-
-
-def get_gst_username(gstin):
-    """
-    Get the GST Username from Rohit GST Settings for a given GSTIN
-    """
-    found = 0
-    gst_username = ""
-    r_set = frappe.get_doc("Rohit GST Settings", "Rohit GST Settings")
-    for row in r_set.gst_registration_details:
-        if row.gst_registration_number == gstin:
-            found = 1
-            gst_username = row.gst_username
-    if found == 0:
-        frappe.throw(f"No GSTIN username found for {gstin}")
-    return gst_username
+def assert_session_active(reg: frappe._dict) -> None:
+    if (cint(reg.api_access_authorized) != 1 or not reg.whitebooks_txn or not reg.validity_of_token
+            or get_datetime(reg.validity_of_token) <= now_datetime()):
+        frappe.throw(f"GST API access for GSTIN {reg.gst_registration_number} is not authorized or has "
+                     "expired. Use Request OTP and Validate OTP in Rohit GST Settings.",
+                     title="GST API Authorization Expired")
 
 
 def get_invoice_type(itype):
@@ -304,3 +210,108 @@ def get_type_of_amend(amend_type):
     elif amend_type == "D":
         amd_type_txt = "D-Details Amended"
     return amd_type_txt
+
+
+def _get_return_sections(return_type, gstin, ret_period, sections):
+    """sections maps the WhiteBooks path segment (e.g. "txp") to the key GSTN
+    uses for that section in the response (e.g. "txpd"). Returns {path segment:
+    rows}. There are no DB writes, so a caller can fetch everything before it
+    changes anything."""
+    reg = get_registration(gstin)
+    assert_session_active(reg)
+    session = _session(reg)
+    result = {}
+    for path, response_key in sections.items():
+        resp = _get(session, f"/{return_type}/{path}", {"gstin": gstin, "retperiod": ret_period})
+        result[path] = _unwrap(resp, response_key, context=f"{return_type.upper()} {path} for "
+                                                           f"GSTIN {gstin}, period {ret_period}")
+    return result
+
+
+def _session(reg, with_txn=True):
+    """Everything a call for this GSTIN needs, built once per batch of calls."""
+    ip_address = frappe.db.get_single_value("Rohit Settings", "whitebooks_gst_ip_address", cache=False)
+    if not ip_address:
+        frappe.throw("Set GST Returns API Server IP Address in Rohit Settings (WhiteBooks section)",
+                     title="WhiteBooks IP Address Missing")
+    headers = whitebooks_provider.get_static_client_headers(API_NAME)
+    headers.update({
+        "gst_username": reg.gst_username,
+        "state_cd": reg.gst_registration_number[:2],
+        "ip_address": ip_address,
+    })
+    if with_txn:
+        if not reg.whitebooks_txn:
+            frappe.throw(f"No WhiteBooks session for GSTIN {reg.gst_registration_number}. "
+                         "Use Request OTP in Rohit GST Settings.", title="GST API Session Missing")
+        headers["txn"] = reg.whitebooks_txn
+    return frappe._dict(
+        base_url=whitebooks_provider.get_base_url(API_NAME),
+        headers=headers,
+        email=whitebooks_provider.get_registered_email(API_NAME),
+    )
+
+
+def _get(session, path, params):
+    response = requests.get(
+        url=session.base_url + path,
+        headers=session.headers,
+        params=dict(params, email=session.email),
+        timeout=TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _is_success(resp):
+    return str(resp.get("status_cd")) == "1"
+
+
+def _error_code(resp):
+    error = resp.get("error")
+    if isinstance(error, dict):
+        return error.get("error_cd")
+    return resp.get("error_cd")
+
+
+def _describe(resp):
+    return f"{resp.get('status_desc') or resp.get('error') or ''} (raw response: {resp})"
+
+
+def _extract_txn(resp):
+    # UNVERIFIED (1)
+    header = resp.get("header")
+    if isinstance(header, dict) and header.get("txn"):
+        return header["txn"]
+    data = resp.get("data")
+    if isinstance(data, dict) and data.get("txn"):
+        return data["txn"]
+    return resp.get("txn")
+
+
+def _extract_auth_token(resp):
+    # WhiteBooks may keep the GSTN auth token on its side and key it by txn.
+    # Store it when it is returned. Nothing here sends it back.
+    data = resp.get("data")
+    if isinstance(data, dict) and data.get("auth_token"):
+        return data["auth_token"]
+    return resp.get("auth_token") or ""
+
+
+def _unwrap(resp, response_key, context):
+    if _is_success(resp):
+        # UNVERIFIED (2)
+        data = resp.get("data")
+        payload = data if isinstance(data, dict) else resp
+        return payload.get(response_key) or []
+    if _error_code(resp) in NO_DATA_ERROR_CODES:
+        return []
+    frappe.throw(f"{context} failed: {_describe(resp)}", title="WhiteBooks GST Returns API Error")
+
+
+def _require_str(label, value):
+    # Type-check at the trust boundary: a whitelisted arg can arrive as a
+    # list/dict (e.g. ["!=", ""]) and turn into a filter.
+    if not isinstance(value, str) or not value.strip():
+        frappe.throw(f"{label} must be a non-empty text value", title="Invalid GST API Input")
+    return value.strip()
