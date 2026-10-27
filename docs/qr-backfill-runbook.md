@@ -1,28 +1,51 @@
 # QR Code Backfill Runbook
 
-Manual runbook for deciding whether to backfill `Sales Invoice.signed_qr_code`
-from historical `qrcode_image` PNGs, and running the backfill once decided.
-See `docs/designs/gst-asp-migration-whitebooks.md` (T7) for the full design
-context — this doc is the operational checklist, not the design rationale.
+This runbook covers how to fill `Sales Invoice.signed_qr_code` from the old
+`qrcode_image` PNGs (issue #17). For the design, see
+`docs/designs/gst-asp-migration-whitebooks.md` (T7).
 
-**This step does not run itself.** The patch
-(`rohit_common.patches.v13.backfill_signed_qr_code`) is registered in
-`patches.txt` so it runs on every `bench migrate`, but it's gated behind
-`frappe.flags.qr_backfill_confirmed` (defaults `False`) and does nothing —
-just logs a warning — until you complete Step 1 below and explicitly confirm.
-This is deliberate: no historical invoice data gets touched by an ordinary
-migrate.
+The patch `rohit_common.patches.v13.backfill_signed_qr_code` runs
+automatically on `bench migrate`. Its `patches.txt` line has the suffix
+`#2026-10-27`. Frappe recorded the old `#2026-08-22` line as done, but that run
+skipped its work because of a flag gate. A changed suffix makes Frappe run the
+patch one more time. Keep one patch file: to run it again, change the suffix,
+do not add a second file.
 
-## When to run this
+## What the patch does
 
-- Once, after `T6` (the `signed_qr_code` field) has synced to a site via
-  `bench migrate`, for any site that has historical e-invoices with
-  `qrcode_image` set.
-- Not before — the field must exist first, and this decision is independent
-  of the WhiteBooks ASP migration itself (T1–T5); it does not need the new
-  ASP live to run.
+1. It checks that the Python packages `zxing-cpp`, `Pillow`, `pyqrcode` and
+   `pypng` are installed. If one is missing, the patch **fails migrate** and
+   prints the install steps. Frappe does not record a failed patch, so the
+   patch runs again on the next migrate.
+2. If the `signed_qr_code` column does not exist yet, the patch syncs the
+   app's custom fields. Patches run before migrate syncs custom fields.
+3. For each Sales Invoice that has `qrcode_image` set and `signed_qr_code`
+   empty, the patch:
+   - reads the PNG from disk and decodes it with zxing-cpp;
+   - checks that the decoded text re-renders to a **pixel-identical** PNG, with
+     the same pyqrcode settings as `einv.attach_qrcode()`. This proves that the
+     print formats will draw the same QR;
+   - writes `signed_qr_code` with `db.set_value` (`modified` does not change).
+4. It commits every 500 invoices and prints the progress.
+5. Invoices that fail (for example, a file missing on disk) do **not** fail the
+   patch. One Error Log entry, titled `QR backfill: invoices not backfilled`,
+   lists them grouped by reason.
 
-## Step 1 — Run the sample check
+## Step 1: install the packages (each server, once)
+
+These are pip-only packages. No `apt` package is necessary.
+
+```bash
+cd <bench-root>
+bench setup requirements --python
+# or only this app: ./env/bin/pip install -e apps/rohit_common
+./env/bin/python -c "import zxingcpp, pyqrcode, png, PIL; print('ok')"
+```
+
+`zxing-cpp` is pinned to `2.2.0`, because that is the last version with a
+Python 3.8 wheel. A newer version tries to build from source and fails.
+
+## Step 2 (optional): run a sample check
 
 ```bash
 bench --site <sitename> console
@@ -33,66 +56,62 @@ from rohit_common.rohit_common.india_gst_api.qr_backfill import sample_decode_ch
 report = sample_decode_check(sample_size=50)
 ```
 
-This prints a decode rate and returns a dict with per-invoice failure
-reasons. **Needs `pyzbar` + the system-level `zbar` library installed**
-(`pip install pyzbar` alone is not enough — `apt install libzbar0` on
-Debian/Ubuntu, or the equivalent for your OS, is also required). If the
-import fails with a `zbar shared library not found` style error, install
-`zbar` first and retry — this hasn't been confirmed installable on any
-specific bench as of 2026-08-22, per the design doc's own open item.
+The sample check writes nothing. A failure with the reason `file missing on
+disk` means that the PNG file is not on this server. Other reasons need a
+closer look before you continue.
 
-## Step 2 — Decide
+## Step 3: migrate
 
-- **Decode rate ≥ 95%**: proceed to Step 3.
-- **Decode rate < 95%**: do not run the backfill. Historical invoices before
-  `signed_qr_code` existed stay blank — a documented gap (Option (b) in the
-  design doc), not a bug. Note the actual observed rate somewhere durable
-  (this file, a TODOS.md entry, or a project memory) so a future session
-  doesn't re-run Step 1 from scratch without knowing this was already tried.
+```bash
+bench --site <sitename> migrate
+```
 
-## Step 3 — Run the backfill
+## Step 4: examine the result
 
-Still from the same bench console session (or a fresh one):
+- Open the Error Log entry `QR backfill: invoices not backfilled`, if there is one.
+- Spot-check some invoices. Open the print preview (Domestic Invoice or Export
+  Invoice) and scan the QR with the GST e-invoice verify app.
+
+## Run the backfill again
+
+The backfill selects only invoices with an empty `signed_qr_code`. Thus you can
+run it again at any time, for example after you restore the missing PNG files:
 
 ```python
-import frappe
-frappe.flags.qr_backfill_confirmed = True
 from rohit_common.rohit_common.india_gst_api.qr_backfill import backfill_signed_qr_code
 report = backfill_signed_qr_code()
 ```
 
-Or, non-interactively, via `bench execute` (note: `frappe.flags` is
-per-process, so the flag has to be set inside the same execution — use the
-console method above rather than trying to pass the flag externally).
+## Known gap on dev-rb-v12 (2026-10-27)
 
-This prints a summary (`N/total backfilled, M failed`) and returns the same
-shape as the sample check. Per-invoice failures are logged to Error Log with
-title `QR backfill: invoice not backfilled` — review those before considering
-the backfill complete, per the design's "not silently skipped" requirement.
+The PNG files on dev are a partial copy:
 
-## Step 4 — Confirm
+| Year | PNG on disk | PNG missing |
+|------|-------------|-------------|
+| 2022 | 4,080 | 254 |
+| 2023 | 5,512 | 336 |
+| 2024 | 3,380 | 3,126 |
+| 2025–2026 | 0 | 9,455 |
 
-- Spot-check a handful of backfilled invoices: `signed_qr_code` should be a
-  long, non-empty string, structurally distinct per invoice (not the same
-  value repeated — that would indicate something went wrong upstream of the
-  per-invoice decode).
-- If the failure count is unexpectedly high compared to the Step 1 sample
-  rate, stop and investigate before considering this done — a full-dataset
-  run surfacing a much worse rate than the 50-sample check suggests the
-  sample wasn't representative, not that the full run is fine to leave as-is.
+On dev, about 13k invoices fail with `file missing on disk`. This is
+expected. Copy the files from production (`sites/<site>/private/files/QRCode_*.png`)
+and run the backfill again. On a sample of 2,000 PNGs that are on disk, all
+decoded and all matched pixel for pixel.
+
+## Print formats
+
+`Domestic Invoice` and `Export Invoice` draw the QR from `signed_qr_code`
+through the Jinja method `get_einvoice_qr_data_uri` (`hooks.py` `jenv`,
+`india_gst_api/qr_render.py`). They use `qrcode_image` only if
+`signed_qr_code` is empty. Do not delete the PNGs until every invoice that
+has a QR also has `signed_qr_code`.
 
 ## Rollback
 
-There's no automatic rollback. If backfilled values turn out to be wrong
-(e.g. `is_valid_signed_qr()`'s structural check passed but the decoded text
-isn't actually a valid signed QR payload — see the design doc's caveat that
-this validation isn't a real schema check), clear the field manually:
+There is no automatic rollback. To clear the backfilled values:
 
 ```sql
 UPDATE `tabSales Invoice` SET signed_qr_code = NULL WHERE <criteria>;
 ```
 
-Re-run the backfill after fixing whatever was wrong with the decode/validate
-logic — `_candidate_invoices()` only selects invoices where `signed_qr_code`
-is still empty, so a partial/corrected re-run is safe and won't re-touch
-already-backfilled rows.
+The print formats then use the PNG again.

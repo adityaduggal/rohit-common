@@ -373,6 +373,10 @@ Each of these blocks the start of implementation for its area — resolve
 before writing code against it, not during.
 
 - **Historical QR code backfill strategy** (blocks: the backfill patch).
+  **Resolved 2026-10-27 (issue #17)**: option (a), with `zxing-cpp` (a pip
+  wheel, no system library) in place of `pyzbar`. On dev-rb-v12, 2,000 of 2,000
+  real PNGs decoded, and every decode re-rendered to a pixel-identical PNG.
+  Patch: `backfill_signed_qr_code` (re-run with suffix `#2026-10-27`). Runbook: `docs/qr-backfill-runbook.md`.
   No raw `SignedQRCode` string exists anywhere for already-issued invoices —
   only the rendered PNG. Two options: (a) write a patch that decodes
   existing `qrcode_image` PNGs back to text via a QR-decode library (e.g.

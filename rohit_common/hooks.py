@@ -60,6 +60,14 @@ after_migrate = [
     "rohit_common.utils.workspace_hide.reapply_hidden_workspaces"
 ]
 
+# Jinja methods for print formats: draws the e-Invoice QR from
+# Sales Invoice.signed_qr_code (issue #17).
+jenv = {
+    "methods": [
+        "get_einvoice_qr_data_uri:rohit_common.rohit_common.india_gst_api.qr_render.get_einvoice_qr_data_uri"
+    ]
+}
+
 # Desk Notifications
 # ------------------
 # See frappe.core.notifications.get_notification_config

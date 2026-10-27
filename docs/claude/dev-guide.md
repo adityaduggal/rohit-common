@@ -17,5 +17,6 @@ All commands run from the bench root, not from this app directory, using `bench`
 - Apply migrations (schema + `before_migrate` patches): `bench --site <sitename> migrate`
 - Open a bench Python console: `bench --site <sitename> console`
 - Site-local Python environment: `<bench-root>/env/bin/python`
+- Install or update this app's Python packages (`requirements.txt`, read by `setup.py`): `bench setup requirements --python`. A plain `bench migrate` does **not** install packages. Run this first after a pull that changes `requirements.txt` — e.g. the `backfill_signed_qr_code` patch fails migrate with these steps if `zxing-cpp` is missing.
 
 There is no separate lint/build/frontend toolchain in this app — JS assets in `public/js/` are plain Desk form scripts loaded via `doctype_js` in `hooks.py`, not bundled.

@@ -2,92 +2,131 @@
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
 """
-Historical e-Invoice QR code backfill (T7, docs/designs/
-gst-asp-migration-whitebooks.md).
+Historical e-Invoice QR code backfill (issue #17, T7 of
+docs/designs/gst-asp-migration-whitebooks.md).
 
 `Sales Invoice.qrcode_image` holds a rendered PNG for every historical
 e-invoice; the raw `SignedQRCode` string that PNG encodes was never
-persisted anywhere (see einv.py's `attach_qrcode()`) and now has a home in
-`signed_qr_code` (T6). This module decodes the existing PNGs back to text.
+persisted (see einv.py's `attach_qrcode()`). This module decodes the PNGs
+back into `signed_qr_code`. Runbook: docs/qr-backfill-runbook.md.
 
-**Two-step process, not one patch — full manual runbook:
-docs/qr-backfill-runbook.md.** Summary: `sample_decode_check()` first,
-against real production data via bench console; only if it reports >= 95%
-does `backfill_signed_qr_code()` (called by
-`patches/v13/backfill_signed_qr_code.py`) get run. **This decision has NOT
-been made as of 2026-08-22** — this module was written without access to a
-live bench/site, so the sample check has never been run against real data.
+A decode is accepted only if re-rendering the text with
+qr_render.render_einvoice_qr_png() gives a pixel-identical PNG — that proves
+the QR the print formats draw from `signed_qr_code` is the same QR as before.
 
-**System dependency**: decoding needs `pyzbar` (added to requirements.txt)
-which in turn needs the system-level `zbar` shared library (`libzbar0` on
-Debian/Ubuntu, `zbar` via Homebrew) — a pip install of `pyzbar` alone is not
-enough. Confirm `zbar` can be installed on the target bench before relying
-on this — flagged, not yet confirmed, per the design doc's own note on this.
-
-**Validation caveat**: `is_valid_signed_qr()` is a best-effort STRUCTURAL
-sanity check (non-trivial length, decodable as UTF-8 text) — NOT a
-cryptographic or schema validation against the real IRP-signed-QR format.
-This repo doesn't have a confirmed reference sample of what a genuine
-SignedQRCode payload looks like once decoded; tighten this once one is
-available (e.g. from a real WhiteBooks sandbox e-invoice response, per The
-Assignment).
+Dependencies are pip-only (zxing-cpp, Pillow, pyqrcode, pypng — all in
+requirements.txt); check_dependencies() fails loudly with install steps.
+Imports are local so this module imports cleanly without them.
 """
+import importlib
 import random
+from collections import defaultdict
 
 import frappe
 
 MIN_VALID_QR_LENGTH = 50
+BATCH_SIZE = 500
+# Module name -> pip package name, as listed in requirements.txt.
+REQUIRED_PACKAGES = {"zxingcpp": "zxing-cpp", "PIL": "Pillow", "pyqrcode": "pyqrcode", "png": "pypng"}
+FILE_URL_FOLDERS = (("/private/files/", "private"), ("/files/", "public"))
+
+
+def check_dependencies():
+    missing = []
+    for module_name, package in REQUIRED_PACKAGES.items():
+        try:
+            importlib.import_module(module_name)
+        except ImportError:
+            missing.append(package)
+    if missing:
+        frappe.throw(
+            f"Missing Python packages: {', '.join(missing)}. Install them, then migrate again "
+            "(the patch is not marked as done, so it runs again):\n"
+            "    cd <bench-root>\n"
+            "    bench setup requirements --python\n"
+            "    # or: ./env/bin/pip install -e apps/rohit_common\n"
+            "    bench --site <site> migrate",
+            title="E-Invoice QR backfill: missing Python packages",
+        )
 
 
 def _decode_bytes_to_text(png_bytes):
     """Decode a QR code PNG's bytes to its encoded text, or None if no QR
-    code was found / it didn't decode. Imports are local so this module can
-    be imported even on a machine without pyzbar/Pillow/zbar installed —
-    only decode_qr_image() and its callers need them."""
+    code was found. The historical PNGs have a 1-module quiet zone, so a
+    white border is added as a safety margin for the detector."""
+    from io import BytesIO
+
+    import zxingcpp
+    from PIL import Image, ImageOps
+
+    image = ImageOps.expand(Image.open(BytesIO(png_bytes)).convert("L"), border=8, fill=255)
+    results = zxingcpp.read_barcodes(image, formats=zxingcpp.BarcodeFormat.QRCode)
+    if not results:
+        return None
+    return results[0].text
+
+
+def matches_original(text, png_bytes):
+    """True if text re-renders to exactly the original PNG's pixels."""
     from io import BytesIO
 
     from PIL import Image
-    from pyzbar.pyzbar import decode
 
-    image = Image.open(BytesIO(png_bytes))
-    results = decode(image)
-    if not results:
-        return None
-    return results[0].data.decode("utf-8", errors="strict")
+    from .qr_render import render_einvoice_qr_png
+
+    original = Image.open(BytesIO(png_bytes))
+    rendered = Image.open(BytesIO(render_einvoice_qr_png(text)))
+    return (
+        original.size == rendered.size
+        and original.convert("1").tobytes() == rendered.convert("1").tobytes()
+    )
+
+
+def _site_path_for(file_url):
+    """Disk path of a site file URL, or None if the URL is not a plain file
+    directly under /files/ or /private/files/ (no subfolders, no '..')."""
+    for prefix, folder in FILE_URL_FOLDERS:
+        if file_url.startswith(prefix):
+            file_name = file_url[len(prefix):]
+            if file_name and "/" not in file_name and file_name not in (".", ".."):
+                return frappe.get_site_path(folder, "files", file_name)
+    return None
 
 
 def decode_qr_image(file_url):
-    """Fetch the File at file_url and decode its QR code to text.
+    """Read the PNG at file_url and decode it to a verified SignedQRCode.
     Returns (decoded_text_or_None, error_or_None) — never raises, so a
     single bad file doesn't abort a bulk backfill run."""
+    path = _site_path_for(file_url or "")
+    if not path:
+        return None, f"unsupported file url: {file_url}"
     try:
-        file_doc = frappe.get_doc("File", {"file_url": file_url})
-        content = file_doc.get_content()
-    except Exception as e:
-        return None, f"could not read file content: {e}"
+        with open(path, "rb") as png_file:
+            png_bytes = png_file.read()
+    except FileNotFoundError:
+        return None, "file missing on disk"
+    except OSError as e:
+        return None, f"could not read file: {e}"
 
     try:
-        decoded = _decode_bytes_to_text(content)
+        decoded = _decode_bytes_to_text(png_bytes)
     except Exception as e:
         return None, f"decode error: {e}"
 
     if decoded is None:
         return None, "no QR code detected in image"
+    if not is_valid_signed_qr(decoded):
+        return None, "failed structural validation"
+    if not matches_original(decoded, png_bytes):
+        return None, "re-rendered QR does not match the original PNG"
     return decoded, None
 
 
 def is_valid_signed_qr(text):
-    """Best-effort structural sanity check — see module docstring caveat.
-    Not a real schema/signature validation."""
+    """Best-effort structural sanity check; matches_original() is the real proof."""
     if not text or not isinstance(text, str):
         return False
-    if len(text) < MIN_VALID_QR_LENGTH:
-        return False
-    try:
-        text.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True
+    return len(text) >= MIN_VALID_QR_LENGTH
 
 
 def _candidate_invoices():
@@ -96,16 +135,17 @@ def _candidate_invoices():
         "Sales Invoice",
         filters={"qrcode_image": ["is", "set"], "signed_qr_code": ["in", ["", None]]},
         fields=["name", "qrcode_image"],
+        order_by="name",
     )
 
 
 def sample_decode_check(sample_size=50):
-    """Manual pre-check (see module docstring) — decode a random sample of
-    real historical qrcode_image PNGs and report the success rate. Run this
-    via bench console before deciding whether to run the bulk backfill.
+    """Manual pre-check: decode a random sample of real historical PNGs and
+    report the success rate, without writing anything.
 
     Returns a dict: {sampled, decoded, decode_rate, failures: [{name, error}]}.
     """
+    check_dependencies()
     candidates = _candidate_invoices()
     sample = random.sample(candidates, min(sample_size, len(candidates)))
 
@@ -113,66 +153,77 @@ def sample_decode_check(sample_size=50):
     failures = []
     for row in sample:
         decoded, error = decode_qr_image(row["qrcode_image"])
-        if decoded is not None and is_valid_signed_qr(decoded):
+        if decoded is not None:
             decoded_count += 1
         else:
-            failures.append({"name": row["name"], "error": error or "failed structural validation"})
+            failures.append({"name": row["name"], "error": error})
 
     sampled = len(sample)
     decode_rate = (decoded_count / sampled) if sampled else 0.0
-    report = {
+    print(f"QR backfill sample check: {decoded_count}/{sampled} decoded and verified ({decode_rate:.1%}).")
+    return {
         "sampled": sampled,
         "decoded": decoded_count,
         "decode_rate": decode_rate,
         "failures": failures,
     }
-    print(
-        f"QR backfill sample check: {decoded_count}/{sampled} decoded cleanly "
-        f"({decode_rate:.1%}). {'PROCEED with backfill' if decode_rate >= 0.95 else 'DO NOT proceed — see design doc Option (b)'}."
-    )
-    return report
 
 
-def backfill_signed_qr_code():
-    """The actual bulk backfill — decode every candidate invoice's QR PNG
-    and write signed_qr_code via db.set_value (patch-context write, no
-    hooks fire; the transaction view-lock is unaffected — it's a read-time
-    check, see the design doc's T7 correction). Per-invoice failures are
-    logged (not silently skipped) and returned in the report so they're
-    visible/reviewable, per the design's "not silently skipped" success
-    criterion.
+def backfill_signed_qr_code(batch_size=BATCH_SIZE):
+    """Decode every candidate invoice's QR PNG and write signed_qr_code via
+    db.set_value (no hooks fire; modified is not touched). Idempotent: only
+    invoices with an empty signed_qr_code are selected, so a re-run after
+    restoring missing files only touches the rows still left.
+
+    Commits after every batch so a crash keeps the finished work. Failures
+    don't raise; they go into the returned report and one Error Log entry.
 
     Returns a dict: {total, backfilled, failed, failures: [{name, error}]}.
     """
+    check_dependencies()
     candidates = _candidate_invoices()
+    total = len(candidates)
     backfilled = 0
     failures = []
 
-    for row in candidates:
+    for index, row in enumerate(candidates, start=1):
         decoded, error = decode_qr_image(row["qrcode_image"])
-        if decoded is not None and is_valid_signed_qr(decoded):
+        if decoded is not None:
             frappe.db.set_value(
                 "Sales Invoice", row["name"], "signed_qr_code", decoded, update_modified=False
             )
             backfilled += 1
         else:
-            failure_reason = error or "failed structural validation"
-            failures.append({"name": row["name"], "error": failure_reason})
-            frappe.log_error(
-                title="QR backfill: invoice not backfilled",
-                message=f"{row['name']}: {failure_reason}",
-            )
+            failures.append({"name": row["name"], "error": error})
 
-    frappe.db.commit()
+        if index % batch_size == 0 or index == total:
+            frappe.db.commit()
+            print(f"QR backfill: {index}/{total} processed, {backfilled} backfilled, {len(failures)} failed")
 
-    report = {
-        "total": len(candidates),
+    if failures:
+        _log_failures(failures)
+
+    print(
+        f"QR backfill complete: {backfilled}/{total} invoices backfilled, {len(failures)} failed"
+        + (" (see Error Log, title 'QR backfill: invoices not backfilled')." if failures else ".")
+    )
+    return {
+        "total": total,
         "backfilled": backfilled,
         "failed": len(failures),
         "failures": failures,
     }
-    print(
-        f"QR backfill complete: {backfilled}/{len(candidates)} invoices backfilled, "
-        f"{len(failures)} failed (see Error Log, title 'QR backfill: invoice not backfilled')."
+
+
+def _log_failures(failures):
+    """One Error Log entry for the whole run, grouped by reason — not one
+    entry per invoice, which would be thousands when files are missing."""
+    by_error = defaultdict(list)
+    for failure in failures:
+        by_error[failure["error"]].append(failure["name"])
+
+    message = "\n\n".join(
+        f"{error} ({len(names)}):\n{', '.join(names)}" for error, names in by_error.items()
     )
-    return report
+    frappe.log_error(title="QR backfill: invoices not backfilled", message=message)
+    frappe.db.commit()

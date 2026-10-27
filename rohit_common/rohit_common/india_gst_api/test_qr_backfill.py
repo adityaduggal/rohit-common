@@ -2,276 +2,208 @@
 #  For license information, please see license.txt
 # -*- coding: utf-8 -*-
 """
-Unit tests for qr_backfill.py (T7, docs/designs/gst-asp-migration-whitebooks.md)
-— decode wiring, structural validation, sample-check reporting, and the
-bulk backfill's per-invoice failure handling. All mocked (frappe, and
-qr_backfill.decode_qr_image itself for the higher-level tests) — no live
-site, no real pyzbar/Pillow/zbar install required to run these.
+Tests for qr_backfill.py and qr_render.py (issue #17), against the real
+zxing-cpp / pyqrcode / Pillow libraries and a real Sales Invoice on the site.
 
-decode_qr_image() itself is tested against a mocked pyzbar/PIL (patched
-into qr_backfill._decode_bytes_to_text's local imports via sys.modules) —
-these tests do NOT prove real QR PNGs decode correctly, only that the
-wiring around whatever pyzbar/PIL return is correct. That needs a real
-pyzbar/zbar install and real historical qrcode_image data (The Assignment
-/ sample_decode_check(), which has not been run against production data
-as of this commit — see the module docstring in qr_backfill.py).
+backfill_signed_qr_code() commits per batch, so frappe.db.commit is patched
+to a no-op and every test rolls back in tearDown.
 
-Run: <bench-root>/env/bin/python -m pytest rohit_common/rohit_common/india_gst_api/test_qr_backfill.py -v
+Run: bench --site <site> run-tests --module rohit_common.rohit_common.india_gst_api.test_qr_backfill
 """
-import sys
-import types
+import base64
+import os
 import unittest
-from unittest.mock import MagicMock, patch
+from io import BytesIO
+from unittest.mock import patch
+
+import frappe
+from PIL import Image
 
 from rohit_common.rohit_common.india_gst_api import qr_backfill
+from rohit_common.rohit_common.india_gst_api.qr_render import (
+    get_einvoice_qr_data_uri,
+    render_einvoice_qr_png,
+)
+
+# Same shape and length (~945 chars) as a real IRP SignedQRCode JWT.
+SIGNED_QR = "eyJhbGciOiJSUzI1NiIsImtpZCI6IjQ0NDQwNUM3ODFFNDgyNTA3MkIzNENB" + "".join(
+    f"{i:04d}abcdefXYZ-_" for i in range(60)
+)
+OTHER_QR = SIGNED_QR[:-1] + "Q"
 
 
-class TestIsValidSignedQr(unittest.TestCase):
-    def test_rejects_empty_string(self):
-        self.assertFalse(qr_backfill.is_valid_signed_qr(""))
-
-    def test_rejects_none(self):
-        self.assertFalse(qr_backfill.is_valid_signed_qr(None))
-
-    def test_rejects_too_short(self):
-        self.assertFalse(qr_backfill.is_valid_signed_qr("short"))
-
-    def test_accepts_long_enough_text(self):
-        self.assertTrue(qr_backfill.is_valid_signed_qr("x" * qr_backfill.MIN_VALID_QR_LENGTH))
-
-    def test_rejects_non_string(self):
-        self.assertFalse(qr_backfill.is_valid_signed_qr(12345))
+def _pixels(png_bytes):
+    image = Image.open(BytesIO(png_bytes))
+    return image.size, image.convert("1").tobytes()
 
 
-class TestDecodeBytesToText(unittest.TestCase):
-    """Tests the thin pyzbar/PIL wrapper directly, by injecting fake
-    pyzbar/PIL modules into sys.modules for the duration of the test — the
-    real imports happen inside the function, so this doesn't need the real
-    packages installed. Proves the wiring (open the image, decode, take the
-    first result, utf-8-decode its .data) is correct; does NOT prove real
-    QR PNGs decode correctly — that needs the real libraries and real data."""
+class TestQrRender(unittest.TestCase):
+    def test_decode_round_trip_of_rendered_png(self):
+        png_bytes = render_einvoice_qr_png(SIGNED_QR)
+
+        self.assertEqual(qr_backfill._decode_bytes_to_text(png_bytes), SIGNED_QR)
+
+    def test_rendered_png_has_historical_qrcode_image_shape(self):
+        # einv.attach_qrcode() PNGs are 1-bit, 2px modules, 1-module quiet zone.
+        image = Image.open(BytesIO(render_einvoice_qr_png(SIGNED_QR)))
+
+        self.assertEqual(image.mode, "1")
+        self.assertEqual(image.size[0] % 2, 0)
+
+    def test_matches_original_only_for_the_same_text(self):
+        png_bytes = render_einvoice_qr_png(SIGNED_QR)
+
+        self.assertTrue(qr_backfill.matches_original(SIGNED_QR, png_bytes))
+        self.assertFalse(qr_backfill.matches_original(OTHER_QR, png_bytes))
+
+    def test_data_uri_is_pixel_identical_to_rendered_png(self):
+        data_uri = get_einvoice_qr_data_uri(SIGNED_QR)
+        prefix = "data:image/png;base64,"
+
+        self.assertTrue(data_uri.startswith(prefix))
+        self.assertEqual(
+            _pixels(base64.b64decode(data_uri[len(prefix):])),
+            _pixels(render_einvoice_qr_png(SIGNED_QR)),
+        )
+
+    def test_data_uri_is_empty_for_empty_code(self):
+        self.assertEqual(get_einvoice_qr_data_uri(""), "")
+        self.assertEqual(get_einvoice_qr_data_uri(None), "")
+
+
+class TestCheckDependencies(unittest.TestCase):
+    def test_raises_with_install_steps_when_a_package_is_missing(self):
+        real_import = qr_backfill.importlib.import_module
+
+        def fake_import(name):
+            if name == "zxingcpp":
+                raise ImportError(name)
+            return real_import(name)
+
+        with patch.object(qr_backfill.importlib, "import_module", side_effect=fake_import):
+            with self.assertRaises(frappe.ValidationError) as ctx:
+                qr_backfill.check_dependencies()
+
+        self.assertIn("zxing-cpp", str(ctx.exception))
+        self.assertIn("bench setup requirements", str(ctx.exception))
+
+    def test_passes_when_all_packages_are_installed(self):
+        qr_backfill.check_dependencies()
+
+
+class QrFileTestCase(unittest.TestCase):
+    """Writes real PNGs to the site's private files folder."""
 
     def setUp(self):
-        self._orig_modules = {}
-        for name in ("PIL", "PIL.Image", "pyzbar", "pyzbar.pyzbar"):
-            self._orig_modules[name] = sys.modules.get(name)
+        self.written_paths = []
 
     def tearDown(self):
-        for name, mod in self._orig_modules.items():
-            if mod is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = mod
+        frappe.db.rollback()
+        for path in self.written_paths:
+            if os.path.exists(path):
+                os.remove(path)
 
-    def _install_fake_pyzbar(self, decode_return):
-        fake_pil = types.ModuleType("PIL")
-        fake_pil_image = types.ModuleType("PIL.Image")
-        fake_pil_image.open = MagicMock(return_value="fake-opened-image")
-        fake_pil.Image = fake_pil_image
-        sys.modules["PIL"] = fake_pil
-        sys.modules["PIL.Image"] = fake_pil_image
-
-        fake_pyzbar_pkg = types.ModuleType("pyzbar")
-        fake_pyzbar_mod = types.ModuleType("pyzbar.pyzbar")
-        fake_pyzbar_mod.decode = MagicMock(return_value=decode_return)
-        fake_pyzbar_pkg.pyzbar = fake_pyzbar_mod
-        sys.modules["pyzbar"] = fake_pyzbar_pkg
-        sys.modules["pyzbar.pyzbar"] = fake_pyzbar_mod
-        return fake_pyzbar_mod
-
-    def test_returns_decoded_utf8_text_from_first_result(self):
-        fake_result = MagicMock()
-        fake_result.data = "signed-qr-payload".encode("utf-8")
-        self._install_fake_pyzbar([fake_result])
-
-        result = qr_backfill._decode_bytes_to_text(b"fake-png-bytes")
-
-        self.assertEqual(result, "signed-qr-payload")
-
-    def test_returns_none_when_no_results(self):
-        self._install_fake_pyzbar([])
-
-        result = qr_backfill._decode_bytes_to_text(b"fake-png-bytes")
-
-        self.assertIsNone(result)
+    def write_png(self, signed_qr):
+        file_name = f"QRCode_test_{frappe.generate_hash(length=10)}.png"
+        path = frappe.get_site_path("private", "files", file_name)
+        with open(path, "wb") as png_file:
+            png_file.write(render_einvoice_qr_png(signed_qr))
+        self.written_paths.append(path)
+        return f"/private/files/{file_name}"
 
 
-class TestDecodeQrImage(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_returns_decoded_text_on_success(self, mock_frappe):
-        fake_file = MagicMock()
-        fake_file.get_content.return_value = b"fake-png-bytes"
-        mock_frappe.get_doc.return_value = fake_file
+class TestDecodeQrImage(QrFileTestCase):
+    def test_decodes_and_verifies_a_real_file(self):
+        file_url = self.write_png(SIGNED_QR)
 
-        with patch(
-            "rohit_common.rohit_common.india_gst_api.qr_backfill._decode_bytes_to_text",
-            return_value="decoded-signed-qr-payload-text-here",
-        ):
-            decoded, error = qr_backfill.decode_qr_image("/files/qr.png")
+        self.assertEqual(qr_backfill.decode_qr_image(file_url), (SIGNED_QR, None))
 
-        self.assertEqual(decoded, "decoded-signed-qr-payload-text-here")
-        self.assertIsNone(error)
-
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_returns_error_when_file_cannot_be_read(self, mock_frappe):
-        mock_frappe.get_doc.side_effect = Exception("file not found")
-
-        decoded, error = qr_backfill.decode_qr_image("/files/missing.png")
+    def test_missing_file(self):
+        decoded, error = qr_backfill.decode_qr_image("/private/files/QRCode_does_not_exist.png")
 
         self.assertIsNone(decoded)
-        self.assertIn("could not read file content", error)
+        self.assertEqual(error, "file missing on disk")
 
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_returns_error_when_no_qr_detected(self, mock_frappe):
-        fake_file = MagicMock()
-        fake_file.get_content.return_value = b"not-actually-a-qr-code"
-        mock_frappe.get_doc.return_value = fake_file
+    def test_rejects_urls_outside_the_files_folders(self):
+        for file_url in ("/private/files/../site_config.json", "/etc/passwd", "", None):
+            decoded, error = qr_backfill.decode_qr_image(file_url)
+            self.assertIsNone(decoded)
+            self.assertIn("unsupported file url", error)
 
-        with patch(
-            "rohit_common.rohit_common.india_gst_api.qr_backfill._decode_bytes_to_text",
-            return_value=None,
-        ):
-            decoded, error = qr_backfill.decode_qr_image("/files/blank.png")
+    def test_image_without_a_qr_code(self):
+        file_name = f"QRCode_test_{frappe.generate_hash(length=10)}.png"
+        path = frappe.get_site_path("private", "files", file_name)
+        Image.new("1", (214, 214), 1).save(path)
+        self.written_paths.append(path)
 
-        self.assertIsNone(decoded)
-        self.assertIn("no QR code detected", error)
-
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_returns_error_on_decode_exception(self, mock_frappe):
-        fake_file = MagicMock()
-        fake_file.get_content.return_value = b"corrupt-bytes"
-        mock_frappe.get_doc.return_value = fake_file
-
-        with patch(
-            "rohit_common.rohit_common.india_gst_api.qr_backfill._decode_bytes_to_text",
-            side_effect=ValueError("corrupt PNG"),
-        ):
-            decoded, error = qr_backfill.decode_qr_image("/files/corrupt.png")
+        decoded, error = qr_backfill.decode_qr_image(f"/private/files/{file_name}")
 
         self.assertIsNone(decoded)
-        self.assertIn("decode error", error)
+        self.assertEqual(error, "no QR code detected in image")
 
 
-class TestSampleDecodeCheck(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.decode_qr_image")
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_reports_decode_rate_across_sample(self, mock_frappe, mock_decode):
-        candidates = [{"name": f"SINV-{i:04d}", "qrcode_image": f"/files/{i}.png"} for i in range(10)]
-        mock_frappe.get_all.return_value = candidates
-
-        # 9 decode cleanly, 1 fails.
-        good_text = "x" * 100
-        mock_decode.side_effect = [
-            (good_text, None) if i < 9 else (None, "no QR code detected")
-            for i in range(10)
-        ]
-
-        report = qr_backfill.sample_decode_check(sample_size=10)
-
-        self.assertEqual(report["sampled"], 10)
-        self.assertEqual(report["decoded"], 9)
-        self.assertAlmostEqual(report["decode_rate"], 0.9)
-        self.assertEqual(len(report["failures"]), 1)
-
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.decode_qr_image")
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_caps_sample_at_available_candidates(self, mock_frappe, mock_decode):
-        candidates = [{"name": "SINV-0001", "qrcode_image": "/files/1.png"}]
-        mock_frappe.get_all.return_value = candidates
-        mock_decode.return_value = ("x" * 100, None)
-
-        report = qr_backfill.sample_decode_check(sample_size=50)
-
-        self.assertEqual(report["sampled"], 1)
-
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.decode_qr_image")
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_structurally_invalid_decode_counts_as_failure(self, mock_frappe, mock_decode):
-        candidates = [{"name": "SINV-0001", "qrcode_image": "/files/1.png"}]
-        mock_frappe.get_all.return_value = candidates
-        # Decoded something, but too short to be a real signed-QR payload.
-        mock_decode.return_value = ("short", None)
-
-        report = qr_backfill.sample_decode_check(sample_size=1)
-
-        self.assertEqual(report["decoded"], 0)
-        self.assertEqual(len(report["failures"]), 1)
-
-
-class TestBackfillSignedQrCode(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.decode_qr_image")
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_backfills_successful_decodes_via_db_set_value(self, mock_frappe, mock_decode):
-        mock_frappe.get_all.return_value = [
-            {"name": "SINV-0001", "qrcode_image": "/files/1.png"},
-        ]
-        mock_decode.return_value = ("x" * 100, None)
-
-        report = qr_backfill.backfill_signed_qr_code()
-
-        mock_frappe.db.set_value.assert_called_once_with(
-            "Sales Invoice", "SINV-0001", "signed_qr_code", "x" * 100, update_modified=False
+@patch("frappe.db.commit", new=lambda: None)
+class TestBackfillSignedQrCode(QrFileTestCase):
+    def setUp(self):
+        super().setUp()
+        names = frappe.get_all("Sales Invoice", filters={"docstatus": 1}, pluck="name", limit=2)
+        if len(names) < 2:
+            self.skipTest("needs 2 submitted Sales Invoices on the site")
+        self.si_ok, self.si_missing = names
+        frappe.db.set_value(
+            "Sales Invoice", self.si_ok,
+            {"qrcode_image": self.write_png(SIGNED_QR), "signed_qr_code": None},
+            update_modified=False,
         )
-        self.assertEqual(report["backfilled"], 1)
-        self.assertEqual(report["failed"], 0)
+        frappe.db.set_value(
+            "Sales Invoice", self.si_missing,
+            {"qrcode_image": "/private/files/QRCode_test_missing.png", "signed_qr_code": None},
+            update_modified=False,
+        )
+        # The real candidate query, limited to the two test invoices.
+        real_candidates = qr_backfill._candidate_invoices
+        test_names = {self.si_ok, self.si_missing}
+        candidates_patch = patch.object(
+            qr_backfill, "_candidate_invoices",
+            lambda: [row for row in real_candidates() if row["name"] in test_names],
+        )
+        candidates_patch.start()
+        self.addCleanup(candidates_patch.stop)
 
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.decode_qr_image")
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_logs_and_reports_per_invoice_failures_not_silent(self, mock_frappe, mock_decode):
-        """Guards the design's 'not silently skipped' success criterion."""
-        mock_frappe.get_all.return_value = [
-            {"name": "SINV-0001", "qrcode_image": "/files/1.png"},
-            {"name": "SINV-0002", "qrcode_image": "/files/2.png"},
-        ]
-        mock_decode.side_effect = [
-            ("x" * 100, None),
-            (None, "no QR code detected in image"),
-        ]
+    def test_backfills_and_reports_failures(self):
+        report = qr_backfill.backfill_signed_qr_code(batch_size=1)
 
-        report = qr_backfill.backfill_signed_qr_code()
+        self.assertEqual(frappe.db.get_value("Sales Invoice", self.si_ok, "signed_qr_code"), SIGNED_QR)
+        self.assertFalse(frappe.db.get_value("Sales Invoice", self.si_missing, "signed_qr_code"))
+        self.assertEqual((report["total"], report["backfilled"], report["failed"]), (2, 1, 1))
+        self.assertEqual(
+            report["failures"], [{"name": self.si_missing, "error": "file missing on disk"}]
+        )
 
-        self.assertEqual(report["backfilled"], 1)
-        self.assertEqual(report["failed"], 1)
-        self.assertEqual(report["failures"][0]["name"], "SINV-0002")
-        mock_frappe.log_error.assert_called_once()
-        log_call = mock_frappe.log_error.call_args
-        self.assertIn("SINV-0002", log_call.kwargs["message"])
+    def test_logs_one_error_log_entry_for_all_failures(self):
+        with patch.object(qr_backfill.frappe, "log_error") as log_error:
+            qr_backfill.backfill_signed_qr_code()
 
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.decode_qr_image")
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_commits_after_processing_all_candidates(self, mock_frappe, mock_decode):
-        mock_frappe.get_all.return_value = [
-            {"name": "SINV-0001", "qrcode_image": "/files/1.png"},
-        ]
-        mock_decode.return_value = ("x" * 100, None)
+        log_error.assert_called_once()
+        self.assertIn(self.si_missing, log_error.call_args.kwargs["message"])
 
+    def test_second_run_only_retries_the_failed_invoice(self):
         qr_backfill.backfill_signed_qr_code()
 
-        mock_frappe.db.commit.assert_called_once()
-
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.decode_qr_image")
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_no_candidates_is_a_clean_no_op(self, mock_frappe, mock_decode):
-        mock_frappe.get_all.return_value = []
-
         report = qr_backfill.backfill_signed_qr_code()
 
-        self.assertEqual(report["total"], 0)
-        mock_decode.assert_not_called()
-        mock_frappe.db.set_value.assert_not_called()
+        self.assertEqual((report["total"], report["backfilled"]), (1, 0))
 
+    def test_sample_check_writes_nothing(self):
+        report = qr_backfill.sample_decode_check(sample_size=10)
 
-class TestCandidateInvoicesQuery(unittest.TestCase):
-    @patch("rohit_common.rohit_common.india_gst_api.qr_backfill.frappe")
-    def test_filters_for_qr_image_set_and_signed_qr_code_empty(self, mock_frappe):
-        mock_frappe.get_all.return_value = []
+        self.assertEqual((report["sampled"], report["decoded"]), (2, 1))
+        self.assertFalse(frappe.db.get_value("Sales Invoice", self.si_ok, "signed_qr_code"))
 
-        qr_backfill._candidate_invoices()
+    def test_print_format_draws_qr_from_signed_qr_code(self):
+        qr_backfill.backfill_signed_qr_code()
 
-        call_kwargs = mock_frappe.get_all.call_args.kwargs
-        self.assertEqual(call_kwargs["filters"]["qrcode_image"], ["is", "set"])
-        self.assertEqual(call_kwargs["filters"]["signed_qr_code"], ["in", ["", None]])
+        html = frappe.get_print("Sales Invoice", self.si_ok, print_format="Domestic Invoice")
 
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertIn('src="data:image/png;base64,', html)
+        self.assertIn(get_einvoice_qr_data_uri(SIGNED_QR), html)

@@ -1,36 +1,27 @@
 import frappe
+from frappe.modules.utils import sync_customizations
 
-from rohit_common.rohit_common.india_gst_api.qr_backfill import backfill_signed_qr_code
+from rohit_common.rohit_common.india_gst_api.qr_backfill import (
+    backfill_signed_qr_code,
+    check_dependencies,
+)
 
 
 def execute():
     """
-    Backfills Sales Invoice.signed_qr_code from existing qrcode_image PNGs
-    (T7, docs/designs/gst-asp-migration-whitebooks.md).
+    Backfills Sales Invoice.signed_qr_code from the qrcode_image PNGs
+    (issue #17). The patches.txt suffix was bumped to #2026-10-27 so this
+    runs once more: the #2026-08-22 run was logged as done although a flag
+    gate made it skip.
 
-    DO NOT let this patch run automatically as part of a routine
-    `bench migrate` until sample_decode_check() (in
-    rohit_common.rohit_common.india_gst_api.qr_backfill) has been run
-    manually against real production data and confirmed a decode rate of
-    at least 95% — that decision has not been made yet as of 2026-08-22
-    (this was written without bench/site access). The guard below makes
-    that an explicit, deliberate opt-in rather than a silent skip or an
-    accidental run. Full manual runbook: docs/qr-backfill-runbook.md.
+    A missing dependency raises, so the patch is not logged and runs again on
+    the next migrate. Invoices that fail to decode (e.g. PNG missing on disk)
+    don't fail the patch: they're in the Error Log, and
+    backfill_signed_qr_code() can be re-run from the console. Runbook:
+    docs/qr-backfill-runbook.md.
     """
-    if not frappe.flags.get("qr_backfill_confirmed"):
-        frappe.logger().warning(
-            "Skipping backfill_signed_qr_code patch: sample_decode_check() has not "
-            "been run and confirmed against real data yet. See "
-            "docs/qr-backfill-runbook.md for the manual steps — run "
-            "sample_decode_check() via bench console, decide, then set "
-            "frappe.flags.qr_backfill_confirmed = True and call "
-            "backfill_signed_qr_code() directly in that same console session "
-            "(frappe.flags is per-process, so `bench execute` from a fresh "
-            "process won't see a flag set externally)."
-        )
-        return
-
+    check_dependencies()
+    # Patches run before migrate syncs custom fields, so add the field first.
     if not frappe.db.has_column("Sales Invoice", "signed_qr_code"):
-        return
-
+        sync_customizations("rohit_common")
     backfill_signed_qr_code()
