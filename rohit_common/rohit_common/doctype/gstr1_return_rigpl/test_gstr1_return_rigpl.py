@@ -174,16 +174,22 @@ class TestReconcile(RealPeriodTestCase):
         errors = self.doc.apply_gst_network_data({"b2b": [gst_b2b_entry(self.rows)], "exp": [{"inv": []}]})
         self.assertEqual(len(errors), 1, errors)
 
-    def test_b2cs_compares_state_totals_across_rates(self):
+    def unregistered_address(self):
         address = frappe.db.sql("""SELECT a.name, s.state_code_numeric FROM `tabAddress` a
             JOIN `tabState` s ON s.name = a.state_rigpl WHERE a.gstin = 'NA' LIMIT 1""", as_dict=1)
         if not address:
             self.skipTest("Needs an unregistered Address with a State")
+        return address[0].name, str(address[0].state_code_numeric).zfill(2)
+
+    def add_b2cs_rows(self, table, address):
         self.doc.set("b2b_invoices", [])
         for idx, (taxable, igst) in enumerate(((100.0, 18.0), (50.0, 6.0)), start=1):
-            self.doc.append("b2c_invoices", {"name": f"test-b2cs-{idx}", "receiver_address": address[0].name,
-                                             "taxable_value": taxable, "igst": igst, "sgst": 0, "cgst": 0, "cess": 0})
-        pos = str(address[0].state_code_numeric).zfill(2)
+            self.doc.append(table, {"name": f"test-{table}-{idx}", "receiver_address": address,
+                                    "taxable_value": taxable, "igst": igst, "sgst": 0, "cgst": 0, "cess": 0})
+
+    def test_b2cs_compares_state_totals_across_rates(self):
+        address, pos = self.unregistered_address()
+        self.add_b2cs_rows("b2c_invoices", address)
         gst = [{"sply_ty": "INTER", "pos": pos, "rt": 18, "txval": 100, "iamt": 18, "flag": "U", "chksum": "B2CS"},
                {"sply_ty": "INTER", "pos": pos, "rt": 12, "txval": 50, "iamt": 6, "flag": "U", "chksum": "B2CS2"}]
 
@@ -191,6 +197,41 @@ class TestReconcile(RealPeriodTestCase):
 
         self.assertEqual(errors, [])
         self.assertTrue(all(d.invoice_checksum == "B2CS" for d in self.doc.b2c_invoices))
+
+    def test_b2cs_allows_rounding_up_to_one_rupee(self):
+        # The old int() comparison failed 149.99 against 150.
+        address, pos = self.unregistered_address()
+        self.add_b2cs_rows("b2c_invoices", address)
+        self.doc.b2c_invoices[0].taxable_value = 99.99
+        rounded = [{"sply_ty": "INTER", "pos": pos, "txval": 150, "iamt": 24, "flag": "U", "chksum": "R"}]
+        self.assertEqual(self.doc.apply_gst_network_data({"b2cs": rounded}), [])
+
+        off = [{"sply_ty": "INTER", "pos": pos, "txval": 152, "iamt": 24, "flag": "U", "chksum": "R"}]
+        errors = self.doc.apply_gst_network_data({"b2cs": off})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("Taxable", errors[0])
+
+    def test_b2csa_sums_amounts_per_rate(self):
+        address, pos = self.unregistered_address()
+        self.add_b2cs_rows("b2csa_invoices", address)
+        gst = [{"omon": "042025", "sply_ty": "INTER", "pos": pos, "flag": "U", "chksum": "B2CSA",
+                "itms": [{"rt": 18, "txval": 100, "iamt": 18}, {"rt": 12, "txval": 50, "iamt": 6}]}]
+
+        errors = self.doc.apply_gst_network_data({"b2csa": gst})
+
+        self.assertEqual(errors, [])
+        self.assertTrue(all(d.invoice_checksum == "B2CSA" for d in self.doc.b2csa_invoices))
+
+    def test_amendments_with_empty_table_are_an_error(self):
+        errors = self.doc.apply_gst_network_data({"b2b": [gst_b2b_entry(self.rows)],
+                                                  "b2ba": [{"ctin": "07AAACR1567J1ZC", "inv": []}]})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("B2B Amendments", errors[0])
+
+    def test_get_details_keeps_amendment_rows(self):
+        self.doc.append("b2ba_invoices", {"document_type": "Sales Invoice", "invoice_number": "MANUAL-1"})
+        self.doc.get_details()
+        self.assertEqual([d.invoice_number for d in self.doc.b2ba_invoices], ["MANUAL-1"])
 
     def test_job_saves_once_when_everything_matches(self):
         reply = {"b2b": [gst_b2b_entry(self.rows)]}

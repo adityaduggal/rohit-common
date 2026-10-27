@@ -133,3 +133,70 @@ can actually go live, on top of the migration itself.
 **Depends on:** The ASP migration's provider-swap half (Approach B layer)
 landing first - e-way bill's auth still needs migrating to WhiteBooks
 regardless of what triggers generation.
+
+---
+
+## GSTR1 Return RIGPL: finish or remove the submit workflow
+
+**What:** `gstr1_return_rigpl.json` has `is_submittable: 1`, but `on_submit()`
+runs `validate_export_invoices()` and `validate_si_tables(submit=1)` and then
+always throws "Submission is Not Allowed for the Time Being". No GSTR1 Return
+RIGPL can be submitted.
+
+**Why:** The Submit button does validation work and then always fails. Either
+decide what "submitted" means for this doctype (lock the record, file the
+return through WhiteBooks `gstr1/retfile`, or only set a status) or remove
+`is_submittable` and `on_submit`.
+
+**Note:** Since 2026-10-27 `validate_si_tables` runs inside `validate()` and
+its receiver-detail changes are saved with the document. Before, they were
+only in memory.
+
+**Effort:** M (after the decision)
+**Priority:** P2
+**Depends on:** A product decision on GSTR1 submission.
+
+---
+
+## GSTR1 Return RIGPL: fill the 6 amendment tables from Sales Invoices
+
+**What:** `b2ba_invoices`, `b2cla_invoices`, `b2csa_invoices`, `cdb_b2ba`,
+`cdn_b2ca` and `export_amend` exist since 2026-10-27, and the GST Network
+reconciliation matches them (`RECONCILED_SECTIONS`). Nothing fills them from
+Sales Invoices yet, so their rows are entered by hand. If the GST Network has
+amendment data for a period and the table is empty, reconciliation reports an
+error and changes nothing.
+
+**Why deferred:** It needs a decision on what a local amendment is: an
+ERPNext amend-after-submit of an invoice that was filed in an earlier period,
+a manual correction, or something else. The original and amended invoice
+numbers (`oinum`/`inum`) must map to the right Sales Invoices.
+
+**Effort:** M (after the decision)
+**Priority:** P2
+**Depends on:** A design decision on local amendment detection.
+
+---
+
+## GSTR1 Return RIGPL: sections with no local data model
+
+**What:** These GSTR1 sections have no table on the doctype. If the GST
+Network has data in any of them, reconciliation reports an error
+(`UNRECONCILED_SECTIONS`):
+- AT and ATA (advance tax, and its amendments). No advance-receipt GST
+  tracking exists in rohit_common.
+- TXP and TXPA (tax paid on advances, and its amendments). This has the same
+  gap as AT.
+
+These sections are not fetched or compared at all: HSNSUM (the doctype builds
+its own `hsn_summary` but does not compare it with the GST Network), DOCISS
+(document series) and NIL (nil-rated or exempt supplies). EINV has no
+WhiteBooks endpoint.
+
+**Why deferred:** Each one is a new data model and new reconciliation logic,
+not a fix. Design each one against a real WhiteBooks reply: the first
+production GSTR1 fetch on 2026-10-27 is the first real sample.
+
+**Effort:** L per section
+**Priority:** P2 (AT/TXP become P1 if the business takes advances)
+**Depends on:** A design pass per section with a real reply.

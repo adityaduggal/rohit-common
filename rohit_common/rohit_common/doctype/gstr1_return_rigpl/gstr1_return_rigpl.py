@@ -28,18 +28,25 @@ RECONCILED_SECTIONS = {
     "cdnr": ("cdnr", "cdn_b2b", "CDN Registered"),
     "cdnur": ("cdnur", "cdn_b2c", "CDN Un-Registered"),
     "exp": ("exp", "export_invoices", "Export Invoices"),
+    # Amendments of invoices reported in earlier periods. Their rows are entered by hand (nothing fills them
+    # from Sales Invoices yet), so they are not in SI_TABLES: get_details() keeps them, and they are not in
+    # the HSN summary of this period.
+    "b2ba": ("b2ba", "b2ba_invoices", "B2B Amendments"),
+    "b2cla": ("b2cla", "b2cla_invoices", "B2C Large Amendments"),
+    "b2csa": ("b2csa", "b2csa_invoices", "B2C Small Amendments"),
+    "cdnra": ("cdnra", "cdb_b2ba", "CDN Registered Amendments"),
+    "cdnura": ("cdnura", "cdn_b2ca", "CDN Un-Registered Amendments"),
+    "expa": ("expa", "export_amend", "Export Invoices Amendments"),
 }
+AMENDMENT_TABLES = ["b2ba_invoices", "b2cla_invoices", "b2csa_invoices", "cdb_b2ba", "cdn_b2ca", "export_amend"]
+B2CS_SECTIONS = ("b2cs", "b2csa")
+# Rupees. GSTN B2CS totals are rounded, so paise-level differences are not mismatches.
+B2CS_TOLERANCE = 1.0
 # This doctype has no table for these sections, so GST data in any of them means the return can't be
 # reconciled here.
 UNRECONCILED_SECTIONS = {
     "at": ("at", "Advances Tax"),
     "ata": ("ata", "Advances Tax Amendments"),
-    "b2ba": ("b2ba", "B2B Amendments"),
-    "b2cla": ("b2cla", "B2C Large Amendments"),
-    "b2csa": ("b2csa", "B2C Small Amendments"),
-    "cdnra": ("cdnra", "CDN Registered Amendments"),
-    "cdnura": ("cdnura", "CDN Un-Registered Amendments"),
-    "expa": ("expa", "Export Invoices Amendments"),
     "txp": ("txpd", "Tax Paid"),
     "txpa": ("txpda", "Tax Paid Amendments"),
 }
@@ -95,12 +102,13 @@ class GSTR1ReturnRIGPL(Document):
                 errors.append(f"<b>{name}</b>: GST Network has {len(gst_data[path])} entries but this document "
                               "has no table for them")
 
-        rows_by_tbl = {tbl: self.get(tbl) or [] for tbl in SI_TABLES}
+        rows_by_tbl = {tbl: self.get(tbl) or [] for tbl in SI_TABLES + AMENDMENT_TABLES}
         doc_nos = collect_gst_document_numbers(gst_data)
         base_maps = {"Sales Invoice": get_base_doc_map("Sales Invoice", doc_nos)}
         if any(d.document_type == "Journal Entry" for rows in rows_by_tbl.values() for d in rows):
             base_maps["Journal Entry"] = get_base_doc_map("Journal Entry", doc_nos)
-        state_codes = get_state_codes([d.receiver_address for d in rows_by_tbl["b2c_invoices"]])
+        state_codes = get_state_codes([d.receiver_address for tbl in ("b2c_invoices", "b2csa_invoices")
+                                       for d in rows_by_tbl[tbl]])
 
         updates = {}
         for path, (_, tbl, name) in RECONCILED_SECTIONS.items():
@@ -110,7 +118,7 @@ class GSTR1ReturnRIGPL(Document):
                 errors.append(f"For <b>{name}</b> there is Data in GST Network but Table for the Same is Empty")
             elif local_rows and not entries:
                 errors.append(f"For <b>{name}</b> there is No Data in GST Network but Table for the Same has Data")
-            elif path == "b2cs":
+            elif path in B2CS_SECTIONS:
                 match_b2cs(entries, local_rows, state_codes, updates, errors)
             else:
                 for entry in entries:
@@ -417,12 +425,15 @@ def match_b2cs(entries, local_rows, state_codes, updates, errors):
         pos = cint(entry.get("pos"))
         totals = gst_by_state.setdefault(pos, {"txval": 0, "iamt": 0, "samt": 0, "camt": 0, "csamt": 0,
                                                "flag": entry.get("flag"), "chksum": entry.get("chksum")})
-        for key in ("txval", "iamt", "samt", "camt", "csamt"):
-            totals[key] += flt(entry.get(key))
+        # B2CSA entries keep the amounts per rate in itms; B2CS entries have them at the top level.
+        for amounts in entry.get("itms") or [entry]:
+            for key in ("txval", "iamt", "samt", "camt", "csamt"):
+                totals[key] += flt(amounts.get(key))
     for pos, gst in gst_by_state.items():
         si_state_wise = [d for d in local_rows if state_codes.get(d.receiver_address) == pos]
         if not si_state_wise:
-            errors.append(f"There is No Data for State Code = {pos} in our System whereas in GSTIN There is for B2CS")
+            errors.append(f"There is No Data for State Code = {pos} in our System whereas in GSTIN There is for "
+                          "B2C Small")
             continue
         row_list = [d.idx for d in si_state_wise]
         ours = {
@@ -435,7 +446,7 @@ def match_b2cs(entries, local_rows, state_codes, updates, errors):
         mismatched = False
         for key, label in (("txval", "Taxable"), ("iamt", "IGST"), ("samt", "SGST"), ("camt", "CGST"),
                            ("csamt", "Cess")):
-            if int(ours[key]) != int(gst[key]):
+            if abs(ours[key] - gst[key]) > B2CS_TOLERANCE:
                 errors.append(f"For State Code {pos} there is a Difference in {label} Value "
                               f"GST= {gst[key]} Our System = {ours[key]} check rows {str(row_list)}")
                 mismatched = True
