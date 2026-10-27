@@ -27,11 +27,24 @@ def execute():
     """
     rset = frappe.get_single("Rohit Settings")
     max_days = cint(rset.max_days_to_keep_version) or DEFAULT_DAYS_TO_KEEP
+    delete_old_versions(max_days, get_listed_days(rset.auto_delete_from_version))
+
+
+def get_listed_days(rows):
+    """
+    Returns {doctype: days to keep} from the Auto Delete from Version rows. Days to Keep is the
+    age of the Versions to keep. A row without it is skipped, so its doctype keeps Versions for
+    Max Days to Keep Version, not for 1 day.
+    """
     listed_days = {}
-    for row in rset.auto_delete_from_version:
-        if row.document_type:
-            listed_days[row.document_type] = max(cint(row.days_to_keep), 1)
-    delete_old_versions(max_days, listed_days)
+    for row in rows:
+        if not row.document_type:
+            continue
+        if cint(row.days_to_keep) < 1:
+            print(f"Days to Keep not set for {row.document_type} hence using Max Days to Keep Version")
+            continue
+        listed_days[row.document_type] = cint(row.days_to_keep)
+    return listed_days
 
 
 def delete_old_versions(max_days, listed_days):

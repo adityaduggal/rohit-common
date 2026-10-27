@@ -12,7 +12,10 @@ from unittest.mock import patch
 import frappe
 
 from rohit_common.rohit_common.scheduled_tasks import auto_delete_version
-from rohit_common.rohit_common.scheduled_tasks.auto_delete_version import delete_old_versions
+from rohit_common.rohit_common.scheduled_tasks.auto_delete_version import (
+	delete_old_versions,
+	get_listed_days,
+)
 
 TEST_DOCNAME_PREFIX = "test-22-version-"
 TEST_CREATION = "1726-01-01 00:00:00"
@@ -73,3 +76,18 @@ class TestAutoDeleteVersion(unittest.TestCase):
 			deleted = delete_old_versions(KEEP_DAYS, {"Note": DELETE_DAYS})
 		self.assertEqual(deleted, 3)
 		self.assertEqual(self._remaining(), ["Event", "ToDo"])
+
+
+class TestGetListedDays(unittest.TestCase):
+	def test_days_to_keep_is_the_age_to_keep(self):
+		rows = [frappe._dict(document_type="Note", days_to_keep=45)]
+		self.assertEqual(get_listed_days(rows), {"Note": 45})
+
+	def test_row_without_days_is_skipped_not_one_day(self):
+		# Before the fix 0 days became 1 day, so the doctype lost all but 1 day of Versions
+		rows = [
+			frappe._dict(document_type="Note", days_to_keep=0),
+			frappe._dict(document_type="ToDo", days_to_keep=None),
+			frappe._dict(document_type=None, days_to_keep=30),
+		]
+		self.assertEqual(get_listed_days(rows), {})

@@ -28,7 +28,16 @@ class RohitSettings(Document):
             if flt(d.days_to_keep) < min_days_to_keep:
                 frappe.throw(f"Minimum {min_days_to_keep} Days is Needed to Keep Files")
             self.validate_doctype_conditions(d, "Auto Deletion Policy for Files")
+        self.validate_version_days()
         self.validate_lock_conditions()
+
+    def validate_version_days(self):
+        for d in self.auto_delete_from_version:
+            if flt(d.days_to_keep) <= 0:
+                frappe.throw(
+                    f"Days to Keep must be greater than 0 for {d.document_type} in Auto Delete "
+                    f"from Version"
+                )
 
     def validate_lock_conditions(self):
         for d in self.locked_doctypes:

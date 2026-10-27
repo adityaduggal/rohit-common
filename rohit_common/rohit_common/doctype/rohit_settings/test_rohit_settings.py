@@ -83,3 +83,15 @@ class TestRohitSettings(unittest.TestCase):
         good = frappe._dict(document_type="Sales Invoice",
             doctype_conditions="docstatus = 1 AND outstanding_amount = 0")
         RohitSettings.validate_doctype_conditions(good, "Auto Deletion Policy for Files")
+
+    def test_version_days_to_keep_must_be_set(self):
+        from rohit_common.rohit_common.doctype.rohit_settings.rohit_settings import RohitSettings
+
+        bad = frappe._dict(auto_delete_from_version=[
+            frappe._dict(document_type="Route History", days_to_keep=0)])
+        with self.assertRaises(frappe.ValidationError):
+            RohitSettings.validate_version_days(bad)
+
+        good = frappe._dict(auto_delete_from_version=[
+            frappe._dict(document_type="Route History", days_to_keep=30)])
+        RohitSettings.validate_version_days(good)
