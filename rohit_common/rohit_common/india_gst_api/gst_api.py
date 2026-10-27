@@ -266,7 +266,7 @@ def _session(reg, with_txn=True):
     """Everything a call for this GSTIN needs, built once per batch of calls."""
     ip_address = frappe.db.get_single_value("Rohit Settings", "whitebooks_gst_ip_address", cache=False)
     if not ip_address:
-        frappe.throw("Set WhiteBooks Server IP Address in Rohit Settings (WhiteBooks section)",
+        frappe.throw("Set WhiteBooks Server IP Address in Rohit Settings (WhiteBooks GST section)",
                      title="WhiteBooks IP Address Missing")
     headers = whitebooks_provider.get_static_client_headers(API_NAME)
     headers.update({

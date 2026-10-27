@@ -27,9 +27,8 @@ def _fake_settings(sandbox_mode=0, **overrides):
     defaults = dict(
         sandbox_mode=sandbox_mode,
         gstin="06AAACR1567J1ZC",
-        eway_bill_id="prod-api-user",
+        eway_bill_id="gst-api-user",
         whitebooks_sandbox_gstin="29AAGCB1286Q000",
-        whitebooks_sandbox_api_username="sandbox-api-user",
         whitebooks_gst_email="gsp@rigpl.com",
         whitebooks_gst_ip_address="10.0.0.1",
         whitebooks_einv_client_id="einv-prod-id",
@@ -192,11 +191,11 @@ class TestEinvoiceRequest(unittest.TestCase):
         auth, call = mock_request.call_args_list
         self.assertEqual(auth.args, ("GET", "https://apisandbox.whitebooks.in/einvoice/authenticate"))
         self.assertEqual(auth.kwargs["headers"]["password"],
-                         "secret-for-whitebooks_sandbox_api_password")
+                         "secret-for-eway_bill_password")
         self.assertEqual(call.args, ("POST", "https://apisandbox.whitebooks.in/einvoice/type/GENERATE/version/V1_03"))
         headers = call.kwargs["headers"]
         self.assertEqual((headers["auth-token"], headers["username"], headers["gstin"]),
-                         ("tok-1", "sandbox-api-user", "29AAGCB1286Q000"))
+                         ("tok-1", "gst-api-user", "29AAGCB1286Q000"))
         self.assertNotIn("password", headers)
         self.assertEqual(call.kwargs["params"], {"email": "gsp@rigpl.com"})
         self.assertEqual(call.kwargs["data"], '{"Version": "1.1"}')
@@ -232,14 +231,27 @@ class TestEinvoiceRequest(unittest.TestCase):
         auth = mock_request.call_args_list[0]
         self.assertEqual(auth.args[1], "https://api.whitebooks.in/einvoice/authenticate")
         self.assertEqual((auth.kwargs["headers"]["username"], auth.kwargs["headers"]["gstin"]),
-                         ("prod-api-user", "06AAACR1567J1ZC"))
+                         ("gst-api-user", "06AAACR1567J1ZC"))
         self.assertEqual(auth.kwargs["headers"]["password"], "secret-for-eway_bill_password")
 
-    def test_missing_api_user_throws_before_any_call(self, mock_frappe, mock_request, _dev):
-        _mock_frappe(mock_frappe, _fake_settings(sandbox_mode=1, whitebooks_sandbox_api_username=None))
+    def test_production_without_api_user_throws_before_any_call(self, mock_frappe, mock_request, _dev):
+        _mock_frappe(mock_frappe, _fake_settings(sandbox_mode=0, eway_bill_id=None))
         with self.assertRaisesRegex(RuntimeError, "GST API Username"):
             wb.einvoice_request("GET", "GETIRN")
         mock_request.assert_not_called()
+
+    def test_sandbox_without_api_user_sends_only_the_client_pair(self, mock_frappe, mock_request, _dev):
+        settings = _fake_settings(sandbox_mode=1, eway_bill_id=None)
+        settings.get_password = MagicMock(side_effect=lambda field, raise_exception=True: (
+            None if field == "eway_bill_password" else f"secret-for-{field}"))
+        _mock_frappe(mock_frappe, settings)
+        mock_request.side_effect = [_reply(self.AUTH), _reply({"status_cd": "1"})]
+
+        wb.einvoice_request("GET", "GETIRN", params={"param1": "a"})
+
+        for call in mock_request.call_args_list:
+            self.assertFalse({"username", "password"} & set(call.kwargs["headers"]))
+        self.assertEqual(mock_request.call_args_list[0].kwargs["headers"]["gstin"], "29AAGCB1286Q000")
 
 
 @patch(f"{WB}.is_developer_mode", return_value=False)
@@ -256,7 +268,7 @@ class TestEwayRequest(unittest.TestCase):
 
         auth, first, second = mock_request.call_args_list
         self.assertEqual(auth.args[1], "https://apisandbox.whitebooks.in/ewaybillapi/v1.03/authenticate")
-        self.assertEqual(auth.kwargs["params"]["username"], "sandbox-api-user")
+        self.assertEqual(auth.kwargs["params"]["username"], "gst-api-user")
         self.assertEqual(first.args[1],
                          "https://apisandbox.whitebooks.in/ewaybillapi/v1.03/ewayapi/getewaybillsbydate")
         self.assertEqual(first.kwargs["params"], {"date": "01/10/2026", "email": "gsp@rigpl.com"})

@@ -30,37 +30,32 @@
   "sb8",
   "gstin",
   "sandbox_mode",
+  "whitebooks_sandbox_gstin",
+  "eway_bill_id",
+  "eway_bill_password",
+  "whitebooks_gst_email",
+  "whitebooks_gst_ip_address",
   "auto_validate_gstin_after",
   "stale_gstin_validation_days",
   "disable_gstin_validation",
+  "cb8_1",
   "enable_einvoice",
   "einvoice_applicable_date",
   "eway_bill_limit",
   "auto_generate_ewb_from_irn",
-  "sb8_1",
-  "whitebooks_einv_client_id",
-  "whitebooks_einv_client_secret",
-  "whitebooks_einv_sandbox_client_id",
-  "whitebooks_einv_sandbox_client_secret",
-  "cb8_1",
   "whitebooks_gst_client_id",
   "whitebooks_gst_client_secret",
   "whitebooks_gst_sandbox_client_id",
   "whitebooks_gst_sandbox_client_secret",
-  "whitebooks_gst_email",
-  "whitebooks_gst_ip_address",
   "cb8_2",
+  "whitebooks_einv_client_id",
+  "whitebooks_einv_client_secret",
+  "whitebooks_einv_sandbox_client_id",
+  "whitebooks_einv_sandbox_client_secret",
   "whitebooks_eway_client_id",
   "whitebooks_eway_client_secret",
   "whitebooks_eway_sandbox_client_id",
-  "whitebooks_eway_sandbox_client_secret",
-  "sb8_2",
-  "eway_bill_id",
-  "eway_bill_password",
-  "cb8_3",
-  "whitebooks_sandbox_gstin",
-  "whitebooks_sandbox_api_username",
-  "whitebooks_sandbox_api_password"
+  "whitebooks_eway_sandbox_client_secret"
  ],
  "fields": [
   {
@@ -195,11 +190,10 @@
    "options": "Global Search DocType"
   },
   {
-   "collapsible": 1,
    "fieldname": "sb8",
    "fieldtype": "Section Break",
-   "label": "WhiteBooks GSP / GST Settings",
-   "description": "GST settings for the WhiteBooks APIs. Sandbox Mode selects the sandbox or production credential pair for every API family below. A developer_mode site always uses the sandbox for e-Invoice and e-Way Bill."
+   "label": "WhiteBooks GST",
+   "description": "Every GST API goes to WhiteBooks.in. WhiteBooks issues a client ID/secret pair per API (e-Invoice, Public GST, e-Way Bill), with a sandbox and a production pair. Sandbox Mode picks the pair; a developer_mode site always uses the sandbox for e-Invoice and e-Way Bill."
   },
   {
    "fieldname": "gstin",
@@ -211,6 +205,36 @@
    "fieldname": "sandbox_mode",
    "fieldtype": "Check",
    "label": "Sandbox Mode"
+  },
+  {
+   "fieldname": "whitebooks_sandbox_gstin",
+   "fieldtype": "Data",
+   "label": "Sandbox GSTIN",
+   "description": "The seller GSTIN used in the sandbox. Migrate fills the WhiteBooks sample 29AAGCB1286Q000."
+  },
+  {
+   "fieldname": "eway_bill_id",
+   "fieldtype": "Data",
+   "label": "GST API Username",
+   "description": "The GSTIN's e-Invoice / e-Way Bill API user. On a sandbox site, enter the sandbox user, or leave it empty to call the sandbox without one."
+  },
+  {
+   "fieldname": "eway_bill_password",
+   "fieldtype": "Password",
+   "label": "GST API Password"
+  },
+  {
+   "description": "The email of the WhiteBooks account. Every call sends it.",
+   "fieldname": "whitebooks_gst_email",
+   "fieldtype": "Data",
+   "label": "WhiteBooks Registered Email",
+   "options": "Email"
+  },
+  {
+   "description": "Public IP address of this ERP server, registered with WhiteBooks. Every call sends it.",
+   "fieldname": "whitebooks_gst_ip_address",
+   "fieldtype": "Data",
+   "label": "WhiteBooks Server IP Address"
   },
   {
    "default": "60",
@@ -236,6 +260,10 @@
    "fieldname": "disable_gstin_validation",
    "fieldtype": "Check",
    "label": "Disable GSTIN Validation"
+  },
+  {
+   "fieldname": "cb8_1",
+   "fieldtype": "Column Break"
   },
   {
    "default": "0",
@@ -264,11 +292,28 @@
    "description": "After the IRN, also generate the e-Way Bill for invoices at or above the e-Way Bill Limit. Else pull or create e-Way Bills by hand."
   },
   {
-   "collapsible": 1,
-   "fieldname": "sb8_1",
-   "fieldtype": "Section Break",
-   "label": "WhiteBooks API Credentials",
-   "description": "WhiteBooks issues a separate client_id/client_secret pair per API product (e-Invoice, Public GST, e-Way Bill), each with its own sandbox/production pair. Every call sends them as headers."
+   "fieldname": "whitebooks_gst_client_id",
+   "fieldtype": "Data",
+   "label": "Public GST API Client ID"
+  },
+  {
+   "fieldname": "whitebooks_gst_client_secret",
+   "fieldtype": "Password",
+   "label": "Public GST API Client Secret"
+  },
+  {
+   "fieldname": "whitebooks_gst_sandbox_client_id",
+   "fieldtype": "Data",
+   "label": "Public GST API Sandbox Client ID"
+  },
+  {
+   "fieldname": "whitebooks_gst_sandbox_client_secret",
+   "fieldtype": "Password",
+   "label": "Public GST API Sandbox Client Secret"
+  },
+  {
+   "fieldname": "cb8_2",
+   "fieldtype": "Column Break"
   },
   {
    "fieldname": "whitebooks_einv_client_id",
@@ -291,47 +336,6 @@
    "label": "e-Invoice Sandbox Client Secret"
   },
   {
-   "fieldname": "cb8_1",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "whitebooks_gst_client_id",
-   "fieldtype": "Data",
-   "label": "Public GST API Client ID"
-  },
-  {
-   "fieldname": "whitebooks_gst_client_secret",
-   "fieldtype": "Password",
-   "label": "Public GST API Client Secret"
-  },
-  {
-   "fieldname": "whitebooks_gst_sandbox_client_id",
-   "fieldtype": "Data",
-   "label": "Public GST API Sandbox Client ID"
-  },
-  {
-   "fieldname": "whitebooks_gst_sandbox_client_secret",
-   "fieldtype": "Password",
-   "label": "Public GST API Sandbox Client Secret"
-  },
-  {
-   "description": "Confirmed 2026-08-22 against WhiteBooks' GST-API Postman collection: every /public/* call requires this as a query param (account email registered with WhiteBooks for this client_id/secret pair) alongside the client_id/client_secret headers - there is no OAuth2 token for this API family.",
-   "fieldname": "whitebooks_gst_email",
-   "fieldtype": "Data",
-   "label": "WhiteBooks Registered Email",
-   "options": "Email"
-  },
-  {
-   "description": "Public IP address of this ERP server. WhiteBooks requires it as the ip_address header on every GSTR1/GSTR2A/GSTR2B and OTP call.",
-   "fieldname": "whitebooks_gst_ip_address",
-   "fieldtype": "Data",
-   "label": "WhiteBooks Server IP Address"
-  },
-  {
-   "fieldname": "cb8_2",
-   "fieldtype": "Column Break"
-  },
-  {
    "fieldname": "whitebooks_eway_client_id",
    "fieldtype": "Data",
    "label": "e-Way Bill Client ID"
@@ -350,47 +354,10 @@
    "fieldname": "whitebooks_eway_sandbox_client_secret",
    "fieldtype": "Password",
    "label": "e-Way Bill Sandbox Client Secret"
-  },
-  {
-   "collapsible": 1,
-   "fieldname": "sb8_2",
-   "fieldtype": "Section Break",
-   "label": "WhiteBooks GST API User (e-Invoice / e-Way Bill)"
-  },
-  {
-   "fieldname": "eway_bill_id",
-   "fieldtype": "Data",
-   "label": "GST API Username",
-   "description": "The GSTIN's e-Invoice / e-Way Bill API user, for production"
-  },
-  {
-   "fieldname": "eway_bill_password",
-   "fieldtype": "Password",
-   "label": "GST API Password"
-  },
-  {
-   "fieldname": "cb8_3",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "whitebooks_sandbox_gstin",
-   "fieldtype": "Data",
-   "label": "Sandbox GSTIN",
-   "description": "The WhiteBooks e-Invoice sandbox seller. Migrate fills the sample 29AAGCB1286Q000 from the WhiteBooks Postman collection. Use the sandbox API user from the WhiteBooks dashboard."
-  },
-  {
-   "fieldname": "whitebooks_sandbox_api_username",
-   "fieldtype": "Data",
-   "label": "Sandbox GST API Username"
-  },
-  {
-   "fieldname": "whitebooks_sandbox_api_password",
-   "fieldtype": "Password",
-   "label": "Sandbox GST API Password"
   }
  ],
  "issingle": 1,
- "modified": "2026-10-27 22:17:17.986922",
+ "modified": "2026-10-27 22:54:39.643395",
  "modified_by": "Administrator",
  "module": "rohit_common",
  "name": "Rohit Settings",

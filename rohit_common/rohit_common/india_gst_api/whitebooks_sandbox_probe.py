@@ -35,14 +35,14 @@ def run(sales_invoice=None):
     replies = {}
     einv = wb.get_document_session(wb.EINVOICE)
     frappe.cache().delete_value(wb._cache_key(einv, "einv_token"))
-    headers = dict(einv.headers, username=einv.username, password=einv.password)
+    headers = dict(einv.headers, **wb._api_user(einv))
     replies["einvoice authenticate"] = wb._send(
         "GET", f"{einv.base_url}/authenticate", headers, {"email": einv.email})
 
     eway = wb.get_document_session(wb.EWAY)
     frappe.cache().delete_value(wb._cache_key(eway, "eway_session"))
     replies["eway authenticate"] = wb._send("GET", f"{eway.base_url}/authenticate", eway.headers,
-        {"email": eway.email, "username": eway.username, "password": eway.password})
+        dict(wb._api_user(eway), email=eway.email))
 
     if sales_invoice:
         payload = gen_einv_json("Sales Invoice", sales_invoice)

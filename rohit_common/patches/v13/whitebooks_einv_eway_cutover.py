@@ -4,10 +4,12 @@ from frappe.utils.password import set_encrypted_password
 from rohit_common.rohit_common.india_gst_api.common import SANDBOX_GSTIN
 
 SETTINGS = "Rohit Settings"
-# Charteredinfo and WhiteBooks-webhook fields removed from Rohit Settings (issue #19)
+# Charteredinfo, WhiteBooks-webhook and sandbox API user fields removed from Rohit
+# Settings (issue #19). One GST API user pair now serves the site's environment.
 REMOVED_FIELDS = ("tax_pro_asp_id", "tax_pro_password", "tax_pro_asp_secret", "api_link",
                   "sandbox_api_link", "access_token", "access_token_time",
-                  "whitebooks_webhook_secret", "whitebooks_webhook_ip_allowlist")
+                  "whitebooks_webhook_secret", "whitebooks_webhook_ip_allowlist",
+                  "whitebooks_sandbox_api_username", "whitebooks_sandbox_api_password")
 SUBMISSION_LOG = "E-Invoice Submission Log"
 
 

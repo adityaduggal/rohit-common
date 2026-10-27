@@ -114,7 +114,7 @@ def _get_client_credentials(rset, api_name):
         env = "sandbox" if sandbox else "production"
         frappe.throw(
             f"WhiteBooks {env} client_id/client_secret for {api_name!r} are not "
-            "configured on Rohit Settings — set them under the WhiteBooks GSP section."
+            "configured on Rohit Settings — set them in the WhiteBooks GST section."
         )
     return client_id, client_secret
 
@@ -131,7 +131,7 @@ def get_registered_email(api_name=None):
     param. One account owns the client pairs of all families."""
     email = _get_settings().whitebooks_gst_email
     if not email:
-        frappe.throw("Set WhiteBooks Registered Email in Rohit Settings (WhiteBooks section)",
+        frappe.throw("Set WhiteBooks Registered Email in Rohit Settings (WhiteBooks GST section)",
                      title="WhiteBooks Email Missing")
     return email
 
@@ -201,23 +201,21 @@ def unwrap(resp, context):
 
 def get_document_session(api_name):
     """GSTIN, API user, client pair, email and IP for an e-Invoice or e-Way Bill
-    call. The sandbox has its own GSTIN and API user."""
+    call. The sandbox uses its own seller GSTIN. GST API Username/Password hold the
+    user of the environment the site uses; in the sandbox it may be empty, and then
+    no user is sent."""
     rset = _get_settings()
     sandbox = _use_sandbox(rset, api_name)
-    if sandbox:
-        gstin = rset.whitebooks_sandbox_gstin
-        username = rset.whitebooks_sandbox_api_username
-        password = rset.get_password("whitebooks_sandbox_api_password", raise_exception=False)
-    else:
-        gstin = rset.gstin
-        username = rset.eway_bill_id
-        password = rset.get_password("eway_bill_password", raise_exception=False)
+    gstin = rset.whitebooks_sandbox_gstin if sandbox else rset.gstin
+    username = rset.eway_bill_id
+    password = rset.get_password("eway_bill_password", raise_exception=False)
     env = "Sandbox" if sandbox else "Production"
-    if not (gstin and username and password):
-        frappe.throw(f"Set the {env} GSTIN, GST API Username and GST API Password in Rohit Settings "
-                     "(WhiteBooks section)", title="WhiteBooks GST API User Missing")
+    if not gstin or (not sandbox and not (username and password)):
+        field = "Sandbox GSTIN" if sandbox else "GSTIN, GST API Username and GST API Password"
+        frappe.throw(f"Set the {field} in Rohit Settings (WhiteBooks GST section)",
+                     title="WhiteBooks GST API User Missing")
     if not rset.whitebooks_gst_ip_address:
-        frappe.throw("Set WhiteBooks Server IP Address in Rohit Settings (WhiteBooks section)",
+        frappe.throw("Set WhiteBooks Server IP Address in Rohit Settings (WhiteBooks GST section)",
                      title="WhiteBooks IP Address Missing")
     client_id, client_secret = _get_client_credentials(rset, api_name)
     return frappe._dict(
@@ -235,7 +233,7 @@ def einvoice_request(method, type_, params=None, body=None, extra_headers=None):
     url = f"{session.base_url}/type/{type_}/version/{EINVOICE_VERSION}"
 
     def send():
-        headers = dict(session.headers, username=session.username)
+        headers = dict(session.headers, **_api_user(session, with_password=False))
         headers["auth-token"] = _einvoice_auth_token(session)
         headers.update(extra_headers or {})
         return _send(method, url, headers, dict(params or {}, email=session.email), body)
@@ -268,12 +266,20 @@ def _cache_key(session, kind):
     return f"whitebooks_{kind}:{session.env}:{session.gstin}"
 
 
+def _api_user(session, with_password=True):
+    """username (and password) of the GST API user, leaving out what is not set"""
+    user = {"username": session.username}
+    if with_password:
+        user["password"] = session.password
+    return {key: value for key, value in user.items() if value}
+
+
 def _einvoice_auth_token(session):
     key = _cache_key(session, "einv_token")
     token = frappe.cache().get_value(key)
     if token:
         return token
-    headers = dict(session.headers, username=session.username, password=session.password)
+    headers = dict(session.headers, **_api_user(session))
     resp = _send("GET", f"{session.base_url}/authenticate", headers, {"email": session.email})
     data = unwrap(resp, f"WhiteBooks e-Invoice authentication for GSTIN {session.gstin}") or {}
     token = data.get("AuthToken")
@@ -296,7 +302,7 @@ def _open_eway_session(session):
     key = _cache_key(session, "eway_session")
     if cint(frappe.cache().get_value(key)):
         return
-    params = {"email": session.email, "username": session.username, "password": session.password}
+    params = dict(_api_user(session), email=session.email)
     resp = _send("GET", f"{session.base_url}/authenticate", session.headers, params)
     unwrap(resp, f"WhiteBooks e-Way Bill authentication for GSTIN {session.gstin}")
     frappe.cache().set_value(key, 1, expires_in_sec=EWAY_SESSION_SECS)
