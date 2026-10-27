@@ -1021,6 +1021,22 @@ of stub-mocking for any further tests in this design.
   - Surfaced by: TODOS.md entry
   - Files: none (planning task)
   - Verify: n/a — tracked in TODOS.md
+- [x] **T14 (P2, 2026-10-27)** — india_gst_api/doctype — GSTR1 / GSTR2A / GSTR2B taxpayer API on WhiteBooks (issue #9 follow-on)
+  - Source: WhiteBooks "WB-GST-API" Postman collection (`GST API.postman_collection.zip`). It confirms the
+    paths `/authentication/{otprequest,authtoken,refreshtoken}`, `/gstr1/<section>`, `/gstr2a/<section>` and
+    `/gstr2b/all`. It confirms the headers `client_id`, `client_secret`, `gst_username`, `state_cd`,
+    `ip_address` and `txn`, and the `email` query param. It uses the same credentials and base URL as PUBLIC_GST.
+  - Files:
+    - `gst_api.py`: the Charteredinfo taxpayer code is replaced in place. The public names stay
+      (`get_gst_otp`, `authenticate_gst_otp`, `check_for_refresh_token`, `get_gstr1/2a/2b`).
+    - `GST Registration Details.whitebooks_txn` and `Rohit Settings.whitebooks_gst_ip_address` are new fields.
+    - `gstr1_return_rigpl.py` and `gstr2a_rigpl.py`: the Button methods are whitelisted. The GST Network
+      fetch runs as a background job. Reads are batched.
+    - `accounts_utils.py`: batched helpers.
+  - UNVERIFIED (see the `gst_api.py` module note): where `otprequest` puts `txn`, the `data` envelope on
+    the GSTR calls, and the "no data" error codes. Confirm them on the first sandbox call.
+  - Verify: run `test_gst_api`, `test_gstr1_return_rigpl` and `test_gstr2a_rigpl` on the real bench. Then
+    do the sandbox OTP (`575757`) and a GSTR1/GSTR2A fetch.
 
 _JSONL artifact skipped — `jq` not installed on this machine. Install it to
 enable `/autoplan` aggregation across phases._
