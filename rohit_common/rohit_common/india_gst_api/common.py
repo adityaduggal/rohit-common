@@ -5,6 +5,14 @@ import frappe
 from datetime import datetime
 from frappe.utils import cint, flt, get_last_day, getdate
 
+# WhiteBooks e-Invoice sandbox seller, from the sample Generate IRN request in
+# WhiteBooks' E-INVOICE-API Postman collection. Public test data, not a secret.
+# The sandbox API user for it comes from the WhiteBooks dashboard and is kept
+# only in Rohit Settings.
+SANDBOX_GSTIN = "29AAGCB1286Q000"
+SANDBOX_SELLER_PIN = 560001
+SANDBOX_SELLER_PLACE = "Bengaluru"
+
 
 def get_place_of_supply(dtype, dname):
     """

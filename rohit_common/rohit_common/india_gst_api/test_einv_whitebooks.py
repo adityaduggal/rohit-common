@@ -90,6 +90,24 @@ class TestGenerateIrn(unittest.TestCase):
         self.assertEqual(mock_log.call_args.args[1], einv.EWB_FAILURE_TITLE + "SINV-0001")
 
 
+class TestSandboxSeller(unittest.TestCase):
+    SELLER = {"Gstin": "06AAACR1567J1ZC", "LglNm": "Rohit Industries", "Stcd": "06", "Pin": 121003,
+              "Loc": "Faridabad", "Addr1": "Plot 1"}
+
+    @patch(f"{EINV}.get_default_gstin", return_value="29AAGCB1286Q000")
+    def test_sample_gstin_gets_its_state_and_bengaluru_pincode(self, _gstin):
+        seller = einv.sandbox_seller(self.SELLER)
+        self.assertEqual((seller.Gstin, seller.Stcd, seller.Pin, seller.Loc),
+                         ("29AAGCB1286Q000", "29", 560001, "Bengaluru"))
+        self.assertEqual((seller.LglNm, seller.Addr1), ("Rohit Industries", "Plot 1"))
+        self.assertEqual(self.SELLER["Gstin"], "06AAACR1567J1ZC")  # input not changed
+
+    @patch(f"{EINV}.get_default_gstin", return_value="27AAGCB1286Q7ZY")
+    def test_other_sandbox_gstin_gets_only_its_state(self, _gstin):
+        seller = einv.sandbox_seller(self.SELLER)
+        self.assertEqual((seller.Gstin, seller.Stcd, seller.Pin), ("27AAGCB1286Q7ZY", "27", 121003))
+
+
 class TestUpdateIrnDetails(SiteTestCase):
     def get_invoice(self):
         name = frappe.db.get_value("Sales Invoice", {"docstatus": 1})

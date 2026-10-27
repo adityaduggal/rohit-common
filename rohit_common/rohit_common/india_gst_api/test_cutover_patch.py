@@ -18,15 +18,17 @@ SETTINGS = "Rohit Settings"
 
 
 class TestCutoverPatch(SiteTestCase):
-    def set_single(self, field, value):
-        frappe.db.sql("DELETE FROM `tabSingles` WHERE doctype = %s AND field = %s", (SETTINGS, field))
-        frappe.db.sql("INSERT INTO `tabSingles` (doctype, field, value) VALUES (%s, %s, %s)",
-                      (SETTINGS, field, value))
+    set_single = staticmethod(cutover.set_single)
+    single = staticmethod(cutover.get_single)
 
-    def single(self, field):
-        rows = frappe.db.sql("SELECT value FROM `tabSingles` WHERE doctype = %s AND field = %s",
-                             (SETTINGS, field))
-        return rows[0][0] if rows else None
+    def test_fills_an_empty_sandbox_gstin_and_keeps_a_set_one(self):
+        self.set_single("whitebooks_sandbox_gstin", "")
+        cutover.execute()
+        self.assertEqual(self.single("whitebooks_sandbox_gstin"), "29AAGCB1286Q000")
+
+        self.set_single("whitebooks_sandbox_gstin", "27AAGCB1286Q7ZY")
+        cutover.execute()
+        self.assertEqual(self.single("whitebooks_sandbox_gstin"), "27AAGCB1286Q7ZY")
 
     def test_moves_the_plain_password_once(self):
         self.set_single("eway_bill_password", "plain-pass")

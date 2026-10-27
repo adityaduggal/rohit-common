@@ -376,7 +376,7 @@
    "fieldname": "whitebooks_sandbox_gstin",
    "fieldtype": "Data",
    "label": "Sandbox GSTIN",
-   "description": "The test GSTIN WhiteBooks gives for its sandbox"
+   "description": "The WhiteBooks e-Invoice sandbox seller. Migrate fills the sample 29AAGCB1286Q000 from the WhiteBooks Postman collection. Use the sandbox API user from the WhiteBooks dashboard."
   },
   {
    "fieldname": "whitebooks_sandbox_api_username",

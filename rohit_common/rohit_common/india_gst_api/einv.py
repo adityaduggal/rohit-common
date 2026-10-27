@@ -17,7 +17,8 @@ from rq.timeouts import JobTimeoutException
 from . import whitebooks_provider
 from .eway_bill_api import get_taxes_type, get_transport_mode, get_eway_distance
 from .common import get_default_gstin, get_numeric_state_code, get_gst_pincode, \
-    get_gst_based_uom, get_place_of_supply, use_gst_sandbox
+    get_gst_based_uom, get_place_of_supply, use_gst_sandbox, SANDBOX_GSTIN, SANDBOX_SELLER_PIN, \
+    SANDBOX_SELLER_PLACE
 DUPLICATE_IRN_ERROR_CODE = "2150"
 EWB_FAILURE_TITLE = "e-Way Bill from IRN Failed for "
 
@@ -152,9 +153,7 @@ def gen_einv_json(dtype, dname):
     ship_add = dtd.shipping_address_name
     einv_dt = add_einv_adr_details(einv_dt, sell_add, type_of_detail="seller")
     if use_gst_sandbox():
-        # The sandbox only accepts its own seller GSTIN
-        einv_dt.SellerDtls.Gstin = get_default_gstin(sbox=1)
-        einv_dt.SellerDtls.Stcd = einv_dt.SellerDtls.Gstin[:2]
+        einv_dt.SellerDtls = sandbox_seller(einv_dt.SellerDtls)
     einv_dt = add_einv_adr_details(einv_dt, buy_add, type_of_detail="buyer", pos=pos)
     einv_dt = add_einv_adr_details(einv_dt, ship_add, type_of_detail="ship",
         port_code=dtd.port_code)
@@ -166,6 +165,20 @@ def gen_einv_json(dtype, dname):
     # Dispatch details are only needed when there is difference in Biller and dispatcher
     # einv_dt = add_einv_adr_details(einv_dt, sell_add, type_of_detail="dispatch")
     return einv_json
+
+
+def sandbox_seller(seller):
+    """
+    The sandbox only accepts its own seller GSTIN, and the IRP checks that the
+    state code and pincode belong to that GSTIN's state. So the sandbox GSTIN gets
+    its own state, pincode and place. If it is the WhiteBooks sample GSTIN, the
+    sample's Bengaluru pincode is used.
+    """
+    gstin = get_default_gstin(sbox=1)
+    seller = frappe._dict(seller, Gstin=gstin, Stcd=gstin[:2])
+    if gstin == SANDBOX_GSTIN:
+        seller.update({"Pin": SANDBOX_SELLER_PIN, "Loc": SANDBOX_SELLER_PLACE})
+    return seller
 
 
 def get_eway_details(dtype, dname):
