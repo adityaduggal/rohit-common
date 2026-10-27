@@ -223,6 +223,7 @@ scheduler_events = {
         "rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.get_unposted_invoices",
         "rohit_common.rohit_common.scheduled_tasks.auto_delete_version.enqueue_deletion",
         "rohit_common.rohit_common.scheduled_tasks.delete_unneeded_files.execute",
+        "rohit_common.rohit_common.scheduled_tasks.db_housekeeping.enqueue_execute",
     ],
 }
 
