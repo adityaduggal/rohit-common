@@ -118,6 +118,9 @@ class TestGenerateGstr1(RealPeriodTestCase):
             self.doc.generate_gstr1()
         self.assertGreater(len(self.doc.b2b_invoices), 1)
         self.doc.filing_status = "Filed"
+        # Warm the meta of the doctypes these two read (Journal Entry Account, Dynamic Link, Address, items).
+        self.doc.validate_si_tables()
+        self.doc.generate_hsn_summary()
         with assert_max_queries(8, test_case=self):
             self.doc.validate_si_tables()
         with assert_max_queries(8, test_case=self):
@@ -229,7 +232,8 @@ class TestReconcile(RealPeriodTestCase):
         self.assertIn("B2B Amendments", errors[0])
 
     def test_get_details_keeps_amendment_rows(self):
-        self.doc.append("b2ba_invoices", {"document_type": "Sales Invoice", "invoice_number": "MANUAL-1"})
+        self.doc.append("b2ba_invoices", {"document_type": "Sales Invoice", "invoice_number": "MANUAL-1",
+                                          "receiver_address": self.rows[0].receiver_address})
         self.doc.get_details()
         self.assertEqual([d.invoice_number for d in self.doc.b2ba_invoices], ["MANUAL-1"])
 
