@@ -61,14 +61,16 @@ def create_docshare_for_tree(doc, chd):
 
 
 def get_file_tree(share_doctype, share_name):
+    # File lft/rgt are set only by the scheduled rebuild_tree(), so a new folder
+    # has none yet. Walk the folder field instead: one query per depth level.
     doc_childs = []
-    if share_doctype == 'File':
-        file_dt = frappe.get_value("File", share_name, fieldname=["is_folder", "lft", "rgt", "folder", "name"],as_dict=1)
-        if file_dt and file_dt.is_folder == 1:
-            doc_childs = frappe.db.sql("""SELECT name, is_folder, lft, rgt, folder FROM `tabFile`
-                WHERE lft > %(lft)s AND rgt < %(rgt)s""", {
-                    "lft": file_dt.lft, "rgt": file_dt.rgt,
-                }, as_dict=1)
+    if share_doctype == 'File' and frappe.db.get_value("File", share_name, "is_folder") == 1:
+        parents = [share_name]
+        while parents:
+            level = frappe.get_all("File", filters={"folder": ["in", parents]},
+                fields=["name", "is_folder", "folder"])
+            doc_childs.extend(level)
+            parents = [chd.name for chd in level if chd.is_folder == 1]
     return doc_childs
 
 
