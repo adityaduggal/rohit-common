@@ -302,18 +302,23 @@ class TestTransactionLockIntegration(unittest.TestCase):
                 "outstanding_amount": 0,
             }
         )
+        frappe.flags.transaction_lock_logged = None
         result = has_permission(doc, ptype="read", user=TEST_USER)
         self.assertIsNone(result)
-        self.assertTrue(
-            frappe.db.exists(
-                "Transaction Lock Access Log",
-                {
-                    "user": TEST_USER,
-                    "reference_doctype": "Sales Invoice",
-                    "reference_name": real_invoice_name,
-                },
-            )
-        )
+        log_filters = {
+            "user": TEST_USER,
+            "reference_doctype": "Sales Invoice",
+            "reference_name": real_invoice_name,
+        }
+        self.assertTrue(frappe.db.exists("Transaction Lock Access Log", log_filters))
+
+        # A form load runs many checks: the same request writes no more rows
+        has_permission(doc, ptype="read", user=TEST_USER)
+        has_permission(doc, ptype="write", user=TEST_USER)
+        # A new request on the same day also writes no more rows
+        frappe.flags.transaction_lock_logged = None
+        has_permission(doc, ptype="read", user=TEST_USER)
+        self.assertEqual(frappe.db.count("Transaction Lock Access Log", log_filters), 1)
         frappe.db.delete(
             "Transaction Lock Access Log",
             {"reference_doctype": "Sales Invoice", "reference_name": real_invoice_name},

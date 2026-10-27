@@ -144,12 +144,7 @@ def check_system_manager(user):
     """
     Returns boolean for a system manager user
     """
-    sys_list = frappe.db.sql(f"""SELECT name FROM `tabHas Role` WHERE parenttype = 'User'
-        AND parent = '{user}' AND role = 'System Manager'""", as_list=1)
-    if sys_list:
-        return 1
-    else:
-        return 0
+    return 1 if "System Manager" in frappe.get_roles(user) else 0
 
 
 def rebuild_tree(doctype, parent_field, group_field):

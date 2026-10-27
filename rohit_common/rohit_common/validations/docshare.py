@@ -11,22 +11,31 @@ Changing a folder sharing settings should change lower ones
 
 from __future__ import unicode_literals
 import frappe
-from frappe.utils.background_jobs import enqueue
+from ...utils.rohit_common_utils import check_system_manager
 
 
 def on_trash(doc, method):
+    # The parent's lft/rgt query already returns the whole subtree, so the
+    # child deletes skip this hook (from_tree_share) and do not walk it again.
+    if doc.flags.from_tree_share:
+        return
     doc_childs = get_file_tree(doc.share_doctype, doc.share_name)
-    if doc_childs:
-        for chd in doc_childs:
-            exists = frappe.db.exists("DocShare", {"owner":doc.owner, "share_doctype":doc.share_doctype, "share_name":chd.name})
-            if exists:
-                shared = frappe.get_doc("DocShare", exists)
-                shared.delete()
+    if not doc_childs:
+        return
+    child_shares = frappe.get_all("DocShare", filters={"user": doc.user,
+        "share_doctype": doc.share_doctype, "share_name": ["in", [chd.name for chd in doc_childs]]},
+        pluck="name")
+    for name in child_shares:
+        shared = frappe.get_doc("DocShare", name)
+        shared.flags.from_tree_share = True
+        shared.flags.ignore_permissions = True
+        shared.delete()
 
 
 def validate(doc, method):
     validate_duplicate(user=doc.user, dt=doc.share_doctype, dn=doc.share_name, ex_name=doc.name)
-    check_create_more_ds(doc)
+    if not doc.flags.from_tree_share:
+        check_create_more_ds(doc)
 
 
 def validate_duplicate(user, dt, dn, ex_name):
@@ -47,19 +56,8 @@ def check_create_more_ds(doc):
 
 
 def create_docshare_for_tree(doc, chd):
-    dshare_args = {
-        "owner": doc.owner,
-        "user": doc.user,
-        "dt": doc.share_doctype,
-        "dn": chd.name,
-        "read": doc.read,
-        "write": doc.write,
-        "share": doc.share,
-        "ev_one": doc.everyone
-    }
     create_docshare(user=doc.user, dt=doc.share_doctype, dn=chd.name,
-        read=doc.read, write=doc.write, share=doc.share, ev_one=doc.everyone)
-    # enqueue(method=create_docshare, queue="short", timeout=300, **dshare_args)
+        read=doc.read, write=doc.write, share=doc.share, ev_one=doc.everyone, from_tree=1)
 
 
 def get_file_tree(share_doctype, share_name):
@@ -83,9 +81,10 @@ def get_docshare_from_dt(dt, user):
 
 
 def create_docshare(user, dt, dn, read=0, write=0, share=0, ev_one=0, subm=0,
-    change_exist=0):
+    change_exist=0, from_tree=0):
     """
-    Dont Create DocShares for Admin, Guest or System Managers
+    Dont Create DocShares for Admin, Guest or System Managers, they already see every document.
+    from_tree=1 marks a child share of a shared folder, so its hooks do not walk the subtree again.
     """
     shared_dts = ["User", "Event", "Note"]
     share_needed = 1
@@ -93,7 +92,6 @@ def create_docshare(user, dt, dn, read=0, write=0, share=0, ev_one=0, subm=0,
     is_sys = check_system_manager(user)
     if (is_sys or user == "Administrator") and (dt not in shared_dts and dn != user):
         share_needed = 0
-        frappe.throw("NO SHARE NEEDED")
     if share_needed == 1:
         if not existing_share:
             dc = frappe.new_doc("DocShare")
@@ -106,9 +104,8 @@ def create_docshare(user, dt, dn, read=0, write=0, share=0, ev_one=0, subm=0,
             dc.everyone = ev_one
             dc.submit = subm
             dc.notify_by_email = 0
-            # print(dc.name)
+            dc.flags.from_tree_share = from_tree
             dc.insert()
-            dc.save()
         else:
             exist_dc = frappe.get_doc("DocShare", {"share_doctype": dt, "user": user, "share_name": dn})
             exist_dc.read = read
@@ -117,12 +114,14 @@ def create_docshare(user, dt, dn, read=0, write=0, share=0, ev_one=0, subm=0,
             exist_dc.everyone = ev_one
             exist_dc.submit = subm
             exist_dc.notify_by_email = 0
+            exist_dc.flags.from_tree_share = from_tree
             exist_dc.save()
     else:
         if existing_share:
             exist_dc = frappe.get_doc("DocShare", {"share_doctype": dt, "user": user, "share_name": dn})
             exist_dc.flags.ignore_permissions = 1
-            exist_dc.delete_doc(delete_permanently=1)
+            exist_dc.flags.from_tree_share = from_tree
+            exist_dc.delete()
 
 
 def delete_docshare(docname):

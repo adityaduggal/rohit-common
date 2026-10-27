@@ -5,6 +5,7 @@
 from __future__ import unicode_literals
 import os
 import frappe
+from frappe import _
 from shutil import copyfile, move
 from frappe.share import get_share_name
 from frappe.utils import get_site_base_path, cstr
@@ -21,19 +22,19 @@ def custom_file_permissions(doc, ptype=None, user=None):
     """
     has_access = False
     user = user or frappe.session.user
-    is_sys = check_system_manager(user)
+    # Cheap checks first: roles are cached, so most calls need no query.
+    if ptype != "create" and (not doc.is_private or doc.owner in [user, "Guest"]
+        or user == "Administrator" or check_system_manager(user) == 1):
+        return True
     shd_name = get_share_name(doctype=doc.doctype, name=doc.name, user=user, everyone=0)
     if shd_name:
-        shd = frappe.get_doc("DocShare", shd_name)
+        shd = frappe.db.get_value("DocShare", shd_name, ["write", "share", "submit"], as_dict=1)
         if shd.write or shd.share or shd.submit:
             has_access = "write"
         else:
             has_access = "read"
     elif ptype == "create":
         has_access = frappe.has_permission("File", "create", user=user)
-    elif not doc.is_private or doc.owner in [user, "Guest"] \
-        or user == "Administrator" or is_sys == 1:
-        has_access = True
     elif doc.attached_to_doctype and doc.attached_to_name:
         attached_to_doctype = doc.attached_to_doctype
         attached_to_name = doc.attached_to_name
@@ -41,17 +42,16 @@ def custom_file_permissions(doc, ptype=None, user=None):
             ref_doc = frappe.get_doc(attached_to_doctype, attached_to_name)
 
             if ptype in ["write", "create", "delete"]:
-                has_access = ref_doc.has_permission("write")
+                has_access = frappe.has_permission(attached_to_doctype, "write", doc=ref_doc, user=user)
 
                 if ptype == "delete" and not has_access:
                     frappe.throw(
-                        _(
-                            f"Cannot delete file as it belongs to {frappe.get_desk_link(doc.attached_to_doctype, doc.attached_to_name)} for which you do not have permissions"
-                        ),
+                        _("Cannot delete file as it belongs to {0} for which you do not have permissions").format(
+                            frappe.get_desk_link(doc.attached_to_doctype, doc.attached_to_name)),
                         frappe.PermissionError,
                     )
             else:
-                has_access = ref_doc.has_permission("read")
+                has_access = frappe.has_permission(attached_to_doctype, "read", doc=ref_doc, user=user)
         except frappe.DoesNotExistError:
             # if parent doc is not created before file is created
             # we cannot check its permission so we will use file's permission
@@ -141,8 +141,7 @@ def check_and_move_file(doc):
                     dt_allowed = 1
                     break
             if dt_allowed == 1:
-                other_files = frappe.db.sql("""SELECT name, is_private FROM `tabFile`
-                WHERE file_name = '%s' AND name != '%s'""" % (doc.file_name, doc.name), as_dict=1)
+                other_files = get_other_files_by_name(doc)
                 # frappe.msgprint(f"Same File Name attached to {str(len(other_files))} more files")
                 for file in other_files:
                     if file.is_private == 1:
@@ -166,8 +165,7 @@ def check_and_move_file(doc):
                 change_file_path(doc)
         else:
             # File attahcment not attached to any doctype so if its not there in any private file move else copy
-            other_files = frappe.db.sql("""SELECT name, is_private FROM `tabFile`
-            WHERE file_name = '%s' AND name != '%s'""" % (doc.file_name, doc.name), as_dict=1)
+            other_files = get_other_files_by_name(doc)
             for file in other_files:
                 if file.is_private == 1:
                     # File exists in both private and public
@@ -187,8 +185,7 @@ def check_and_move_file(doc):
         file_url = "/public/files/" + doc.file_name
         old_full_path = get_site_base_path() + doc.file_url
         full_file_path = get_site_base_path() + file_url
-        other_files = frappe.db.sql("""SELECT name, is_private FROM `tabFile` WHERE file_name = '%s'
-        AND name != '%s'""" % (doc.file_name, doc.name), as_dict=1)
+        other_files = get_other_files_by_name(doc)
         for file in other_files:
             if file.is_private == 0:
                 in_public = 1
@@ -201,6 +198,12 @@ def check_and_move_file(doc):
             move(full_file_path, old_full_path)
             frappe.msgprint(f"Would Move the File From {full_file_path} to {old_full_path}")
             print(f"Would Move the File From {full_file_path} to {old_full_path}")
+
+
+def get_other_files_by_name(doc):
+    return frappe.db.sql("""SELECT name, is_private FROM `tabFile`
+        WHERE file_name = %(file_name)s AND name != %(name)s""",
+        {"file_name": doc.file_name, "name": doc.name}, as_dict=1)
 
 
 def check_public_allowed(doc):
@@ -366,15 +369,15 @@ def get_file_path_from_doc(file_doc):
 
 def check_other_files_with_same_file(fd):
     if fd.file_url:
-        other_file = frappe.db.sql("""SELECT name FROM `tabFile` WHERE file_url = '%s' AND name != '%s'""" %
-                                   (fd.file_url, fd.name))
+        other_file = frappe.db.sql("""SELECT name FROM `tabFile` WHERE file_url = %(url)s AND name != %(name)s""",
+                                   {"url": fd.file_url, "name": fd.name})
         if other_file:
             return 1
         else:
             if fd.file_name:
                 url_like = "%" + fd.file_name + "%"
-                other_file = frappe.db.sql("""SELECT name FROM `tabFile` WHERE file_url LIKE '%s' AND name != '%s'"""
-                                           % (url_like, fd.name))
+                other_file = frappe.db.sql("""SELECT name FROM `tabFile` WHERE file_url LIKE %(url)s AND name != %(name)s""",
+                                           {"url": url_like, "name": fd.name})
                 if other_file:
                     return 1
                 else:
@@ -503,8 +506,7 @@ def change_file_path(fd):
             frappe.db.set_value("File", fd.name, "file_available_on_server", 1)
             frappe.db.set_value("File", fd.name, "is_private", 1)
     else:
-        print("File Name is Not There hence Exiting")
-        exit()
+        frappe.throw(_("File {0} has no file name, so its path cannot change").format(fd.name))
 
 
 def delete_only_file_doc(fd, comment=None, ref_doc_exists=1):

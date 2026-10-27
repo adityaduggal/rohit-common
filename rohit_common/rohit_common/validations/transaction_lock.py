@@ -213,14 +213,23 @@ def is_locked(doc):
 
 
 def log_bypass_access(doc, user):
-    frappe.get_doc(
-        {
-            "doctype": "Transaction Lock Access Log",
-            "user": user,
-            "reference_doctype": doc.doctype,
-            "reference_name": doc.name,
-        }
-    ).insert(ignore_permissions=True)
+    """
+    One log row per user, doc and day. A form load runs many permission
+    checks, so repeats in the same request are skipped without a query.
+    """
+    key = (user, doc.doctype, doc.name)
+    logged = frappe.flags.setdefault("transaction_lock_logged", set())
+    if key in logged:
+        return
+    logged.add(key)
+    filters = {
+        "user": user,
+        "reference_doctype": doc.doctype,
+        "reference_name": doc.name,
+    }
+    if frappe.db.exists("Transaction Lock Access Log", dict(filters, creation=(">=", nowdate()))):
+        return
+    frappe.get_doc(dict(filters, doctype="Transaction Lock Access Log")).insert(ignore_permissions=True)
 
 
 def has_permission(doc, ptype=None, user=None):
