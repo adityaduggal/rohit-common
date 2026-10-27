@@ -110,6 +110,10 @@ class RealPeriodTestCase(unittest.TestCase):
 
 class TestGenerateGstr1(RealPeriodTestCase):
     def test_query_count_does_not_grow_with_rows(self):
+        # The first run loads DocType meta and caches from the DB (about 90 queries in a fresh process).
+        # Count the second run, which is what a warm worker does.
+        self.doc.generate_gstr1()
+        self.doc.clear_all_tables()
         with assert_max_queries(15, test_case=self):
             self.doc.generate_gstr1()
         self.assertGreater(len(self.doc.b2b_invoices), 1)

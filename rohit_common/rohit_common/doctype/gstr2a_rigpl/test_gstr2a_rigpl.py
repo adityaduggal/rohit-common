@@ -105,6 +105,9 @@ class TestGstr2b(RealDocTestCase):
         self.doc.gstr2b_gen_date = None
         with patch(f"{MODULE}.get_gstr2b", return_value=self.reply(row.supplier_invoice_no, row.party_gstin,
                                                                     self.doc.return_period)):
+            # The first run loads DocType meta and caches from the DB; count the second (warm) run.
+            self.doc.get_gstr2b_data()
+            self.doc.gstr2b_gen_date = None
             # match (1) + parent date (1) + row update (1) + reload (parent and child table)
             with assert_max_queries(8, test_case=self):
                 self.doc.get_gstr2b_data()
