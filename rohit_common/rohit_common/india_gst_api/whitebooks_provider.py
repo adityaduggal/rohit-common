@@ -101,15 +101,21 @@ def get_base_url(api_name):
     return host + _API_PATHS[api_name]
 
 
+def _clean(value):
+    """A credential as an HTTP header value. A pasted credential often carries a
+    space or newline at an edge, and requests rejects such a header (InvalidHeader)."""
+    return (value or "").strip()
+
+
 def _get_client_credentials(rset, api_name):
     prefix = _CREDENTIAL_FIELD_PREFIX[api_name]
     sandbox = _use_sandbox(rset, api_name)
     if sandbox:
-        client_id = getattr(rset, f"{prefix}_sandbox_client_id")
-        client_secret = rset.get_password(f"{prefix}_sandbox_client_secret", raise_exception=False)
+        client_id = _clean(getattr(rset, f"{prefix}_sandbox_client_id"))
+        client_secret = _clean(rset.get_password(f"{prefix}_sandbox_client_secret", raise_exception=False))
     else:
-        client_id = getattr(rset, f"{prefix}_client_id")
-        client_secret = rset.get_password(f"{prefix}_client_secret", raise_exception=False)
+        client_id = _clean(getattr(rset, f"{prefix}_client_id"))
+        client_secret = _clean(rset.get_password(f"{prefix}_client_secret", raise_exception=False))
     if not client_id or not client_secret:
         env = "sandbox" if sandbox else "production"
         frappe.throw(
@@ -206,15 +212,16 @@ def get_document_session(api_name):
     no user is sent."""
     rset = _get_settings()
     sandbox = _use_sandbox(rset, api_name)
-    gstin = rset.whitebooks_sandbox_gstin if sandbox else rset.gstin
-    username = rset.eway_bill_id
-    password = rset.get_password("eway_bill_password", raise_exception=False)
+    gstin = _clean(rset.whitebooks_sandbox_gstin if sandbox else rset.gstin)
+    username = _clean(rset.eway_bill_id)
+    password = _clean(rset.get_password("eway_bill_password", raise_exception=False))
+    ip_address = _clean(rset.whitebooks_gst_ip_address)
     env = "Sandbox" if sandbox else "Production"
     if not gstin or (not sandbox and not (username and password)):
         field = "Sandbox GSTIN" if sandbox else "GSTIN, GST API Username and GST API Password"
         frappe.throw(f"Set the {field} in Rohit Settings (WhiteBooks GST section)",
                      title="WhiteBooks GST API User Missing")
-    if not rset.whitebooks_gst_ip_address:
+    if not ip_address:
         frappe.throw("Set WhiteBooks Server IP Address in Rohit Settings (WhiteBooks GST section)",
                      title="WhiteBooks IP Address Missing")
     client_id, client_secret = _get_client_credentials(rset, api_name)
@@ -222,7 +229,7 @@ def get_document_session(api_name):
         api_name=api_name, env=env, gstin=gstin, username=username, password=password,
         email=get_registered_email(api_name), base_url=get_base_url(api_name),
         headers={"client_id": client_id, "client_secret": client_secret,
-                 "ip_address": rset.whitebooks_gst_ip_address, "gstin": gstin},
+                 "ip_address": ip_address, "gstin": gstin},
     )
 
 
@@ -319,6 +326,10 @@ def _send(method, url, headers, params, body=None):
         reply = response.json()
     except requests.RequestException as e:
         error = type(e).__name__
+        bad = [name for name, value in headers.items() if not isinstance(value, str) or value != value.strip()]
+        if bad:
+            # Name the header, never its value: it can be a secret
+            error += f" in header {', '.join(bad)}"
     except ValueError:
         error = f"HTTP {response.status_code}, reply is not JSON"
     # Throw outside the except block, so the traceback does not chain the

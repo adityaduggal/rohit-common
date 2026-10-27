@@ -286,7 +286,37 @@ class TestEwayRequest(unittest.TestCase):
         self.assertEqual(mock_request.call_count, 4)
 
 
+class TestCredentialsAreStripped(unittest.TestCase):
+    @patch(f"{WB}.is_developer_mode", return_value=False)
+    @patch(f"{WB}.frappe")
+    def test_edge_spaces_are_removed_from_every_header(self, mock_frappe, _dev):
+        """A pasted secret with a trailing space made requests raise InvalidHeader."""
+        settings = _fake_settings(sandbox_mode=1, whitebooks_eway_sandbox_client_id=" eway-sandbox-id\n",
+                                  whitebooks_gst_ip_address="10.0.0.1 ")
+        settings.get_password = MagicMock(side_effect=lambda field, raise_exception=True: f" {field} ")
+        _mock_frappe(mock_frappe, settings)
+
+        session = wb.get_document_session(wb.EWAY)
+
+        self.assertEqual(session.headers, {"client_id": "eway-sandbox-id",
+            "client_secret": "whitebooks_eway_sandbox_client_secret", "ip_address": "10.0.0.1",
+            "gstin": "29AAGCB1286Q000"})
+        self.assertEqual(session.password, "eway_bill_password")
+
+
 class TestSendHidesUrl(unittest.TestCase):
+    @patch(f"{WB}.requests.request")
+    @patch(f"{WB}.frappe")
+    def test_invalid_header_names_the_header_but_not_its_value(self, mock_frappe, mock_request):
+        mock_frappe.throw.side_effect = _raise
+        mock_request.side_effect = requests.exceptions.InvalidHeader("bad value ' SECRET '")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            wb._send("GET", "https://api.whitebooks.in/x", {"client_secret": " SECRET ", "gstin": "29A"}, {})
+
+        self.assertIn("InvalidHeader in header client_secret", str(ctx.exception))
+        self.assertNotIn("SECRET", str(ctx.exception))
+
     @patch(f"{WB}.requests.request")
     @patch(f"{WB}.frappe")
     def test_network_error_does_not_show_the_query_string(self, mock_frappe, mock_request):
