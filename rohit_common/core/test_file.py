@@ -19,6 +19,7 @@ from rohit_common.utils.rohit_common_utils import check_system_manager
 
 TEST_USER = "test-file-perm@example.com"
 QUOTE_FILE_NAME = "test-o'brien-file.txt"
+PUBLIC_FILE_NAME = "test-public-only-url.txt"
 
 
 class TestFileHooks(unittest.TestCase):
@@ -89,3 +90,53 @@ class TestFileHooks(unittest.TestCase):
 		self.assertFalse(custom_file_permissions(doc, "read", TEST_USER))
 		self.assertTrue(custom_file_permissions(doc, "read", "Administrator"))
 		frappe.delete_doc("ToDo", todo.name, force=1, ignore_permissions=True)
+
+
+class TestPublicFileConversion(unittest.TestCase):
+	"""Issue #28: File with only file_url, made by a user without a public-file role."""
+
+	def setUp(self):
+		self.public_path = get_files_path(PUBLIC_FILE_NAME)
+		self.private_path = get_files_path(PUBLIC_FILE_NAME, is_private=1)
+		with open(self.public_path, "w") as f:
+			f.write("test content")
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.delete("File", {"file_name": PUBLIC_FILE_NAME})
+		for path in (self.public_path, self.private_path):
+			if os.path.exists(path):
+				os.remove(path)
+		frappe.db.commit()
+
+	def _file_doc(self, url, **flags):
+		doc = frappe.get_doc({"doctype": "File", "file_url": url})
+		doc.flags.ignore_permissions = True
+		doc.flags.update(flags)
+		return doc
+
+	def test_unconfirmed_conversion_throws_clear_error(self):
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._file_doc("/files/" + PUBLIC_FILE_NAME).insert()
+		self.assertIn(PUBLIC_FILE_NAME, str(ctx.exception))
+		self.assertTrue(os.path.exists(self.public_path))
+
+	def test_confirmed_conversion_moves_the_file(self):
+		doc = self._file_doc("/files/" + PUBLIC_FILE_NAME, convert_to_private=1).insert()
+		self.assertEqual(doc.file_url, "/private/files/" + PUBLIC_FILE_NAME)
+		self.assertEqual(doc.is_private, 1)
+		self.assertFalse(os.path.exists(self.public_path))
+		self.assertTrue(os.path.exists(self.private_path))
+
+	def test_private_url_stays_private(self):
+		os.rename(self.public_path, self.private_path)
+		doc = self._file_doc("/private/files/" + PUBLIC_FILE_NAME).insert()
+		self.assertEqual(doc.is_private, 1)
+		self.assertEqual(doc.file_url, "/private/files/" + PUBLIC_FILE_NAME)
+
+	def test_no_file_name_and_no_url_does_not_crash(self):
+		doc = frappe._dict(file_name=None, file_url=None, flags=frappe._dict())
+		from rohit_common.core.file import convert_to_private
+		convert_to_private(doc, "test")
+		self.assertFalse(doc.get("is_private"))

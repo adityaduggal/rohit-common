@@ -206,28 +206,58 @@ def get_other_files_by_name(doc):
         {"file_name": doc.file_name, "name": doc.name}, as_dict=1)
 
 
+def get_file_name(doc):
+    """Frappe sets file_name from file_url only in validate, after before_insert runs."""
+    if doc.file_name:
+        return doc.file_name
+    if doc.file_url:
+        return doc.file_url.split("/")[-1]
+    return None
+
+
 def check_public_allowed(doc):
-    # Check if File is Private or Public Only incase of Public Check rules
-    # If Attached to Doctype then check 2 things if Role is Allowed and If Dt is Allowed
-    # If not attached to DT then check if role is allowed or not if not then TRHOW
+    # Public files are allowed only for roles in roles_allow_pub_att and, when attached to a
+    # DocType, only for DocTypes in docs_with_pub_att. Anything else must be private.
     doc_allowed, role_allowed = get_public_allowed(doc)
     if doc_allowed == 1 and role_allowed == 1:
-        pass
+        return
+    if role_allowed != 1:
+        reason = f"{frappe.session.user} is not allowed to create public files"
     else:
-        if role_allowed != 1:
-            # Convert the Public File to Private and Store in Private Folder
-            doc.is_private = 1
-            doc.file_url = "/private/files/" + doc.file_name
-            frappe.msgprint(f"Converted {doc.file_name} to Private Since {frappe.session.user} is "
-                f"Not Allowed to Create Public Files")
-        elif doc_allowed != 1:
-            doc.is_private = 1
-            doc.file_url = "/private/files/" + doc.file_name
-            frappe.msgprint(f"Converted {doc.file_name} to Private Since {doc.attached_to_doctype} "
-                f"is Not Allowed in Rohit Settings for Public Attachments.<br>To Create a Public "
-                f"first Add {doc.attached_to_doctype} in Rohit Settings and then Attach Again")
-        else:
-            frappe.throw(f"Condition Undefined for File Attachments")
+        reason = f"{doc.attached_to_doctype} is not allowed in Rohit Settings for public attachments"
+    convert_to_private(doc, reason)
+
+
+def convert_to_private(doc, reason):
+    """
+    A public file is never made private silently: the caller must confirm with
+    convert_to_private=1 (form data or doc.flags). The URL changes only when the file is
+    moved with it, else the link would point to a file that does not exist.
+    """
+    file_name = get_file_name(doc)
+    if not file_name:
+        return
+    if not (doc.flags.convert_to_private or frappe.form_dict.get("convert_to_private")):
+        frappe.throw(
+            _("{0}: {1}. Attach it again as a private file or confirm to convert it to private.").format(
+                file_name, reason), title=_("Public File Not Allowed"))
+    doc.is_private = 1
+    if not doc.file_url or doc.file_url.startswith("/private/"):
+        return
+    move_stored_file_to_private(doc, file_name)
+
+
+def move_stored_file_to_private(doc, file_name):
+    public_path = get_site_base_path() + "/public" + doc.file_url
+    private_url = "/private/files/" + file_name
+    if not doc.file_url.startswith("/files/") or not os.path.exists(public_path):
+        frappe.throw(_("File {0} is not in the public files folder, so it cannot become private").format(
+            file_name))
+    if check_other_files_with_same_file(doc):
+        frappe.throw(_("File {0} is used by another File, so it cannot be moved to private").format(
+            file_name))
+    move(public_path, get_site_base_path() + private_url)
+    doc.file_url = private_url
 
 
 def get_public_allowed(doc):
