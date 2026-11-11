@@ -18,3 +18,7 @@ Detailed guidance lives in `docs/claude/`, split by topic to keep this file shor
 - `docs/claude/architecture-hooks.md` — how `hooks.py` wires the app together (`doc_events`, `scheduler_events`, permission overrides, `before_migrate`), and the `Rohit Settings` DocType that drives runtime config.
 - `docs/claude/architecture-transaction-lock.md` — the transaction view-lock feature (read-restriction on aged transactional docs), locked doctypes, bypass role, known gaps.
 - `docs/claude/architecture-gst-integration.md` — the `india_gst_api/` GST/ASP client layer, the WhiteBooks.in client and what each API family does, the async/background job pattern, and where custom DocTypes/validations live.
+
+## GitHub
+
+All GitHub repos, issues and PRs for this project are in `adityaduggal`, never in `erpnext-apps`. The `erpnext-apps` git remote is a read-only upstream: do not create issues or PRs there. Always pass `-R adityaduggal/<repo>` to `gh`: `adityaduggal/rohit-common` and `adityaduggal/rigpl-erpnext`.
