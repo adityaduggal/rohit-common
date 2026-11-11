@@ -32,6 +32,7 @@ class TestFileHooks(unittest.TestCase):
 				"doctype": "User",
 				"email": TEST_USER,
 				"first_name": "File Perm Test",
+				"mobile_no": "9999999999",
 				"send_welcome_email": 0,
 			}).insert(ignore_permissions=True)
 		frappe.db.commit()

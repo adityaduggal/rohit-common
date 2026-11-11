@@ -264,7 +264,8 @@ def get_public_allowed(doc):
     rset = frappe.get_doc("Rohit Settings")
     doc_allowed, role_allowed = 0, 0
     user_roles = frappe.get_roles(frappe.session.user)
-    if doc.is_private == 1:
+    # is_private is derived from file_url only later, in Frappe's validate
+    if doc.is_private == 1 or (doc.file_url or "").startswith("/private/"):
         doc_allowed = 1
         role_allowed = 1
     else:
