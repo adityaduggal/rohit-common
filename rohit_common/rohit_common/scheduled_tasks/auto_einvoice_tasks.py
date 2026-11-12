@@ -5,7 +5,7 @@
 import time
 import frappe
 import requests
-from frappe.utils import add_to_date, flt, getdate, now_datetime, nowdate
+from frappe.utils import add_to_date, cint, flt, getdate, now_datetime, nowdate
 from frappe.utils.background_jobs import enqueue
 from rq.timeouts import JobTimeoutException
 from ..india_gst_api.einv import einv_needed, generate_irn
@@ -122,6 +122,51 @@ def make_einvoice_for_docs():
         frappe.db.commit()
 
 
+def make_pending_einvoices(from_date=None, send=0):
+    """
+    Manual catch-up for the invoices the sweep never sends: every submitted Sales
+    Invoice posted on or after from_date that needs an IRN and has none. Without
+    send=1 it only lists them. Without from_date it lists from the eInvoice
+    applicable date, and send=1 is refused. An invoice that already has an IRN on the IRP gets
+    that IRN saved. A failure is printed and logged, and the run goes on.
+
+        bench --site <sitename> execute \\
+            rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.make_pending_einvoices \\
+            --kwargs "{'from_date': '2026-10-27', 'send': 1}"
+    """
+    einv_date = frappe.get_value("Rohit Settings", "Rohit Settings", "einvoice_applicable_date")
+    if cint(send) and not from_date:
+        frappe.throw("Give from_date with send=1")
+    if not from_date or (einv_date and getdate(from_date) < getdate(einv_date)):
+        from_date = einv_date
+    if not from_date:
+        frappe.throw("Give from_date, or set E-Invoice Applicable Date in Rohit Settings")
+    pending = _find_pending_einvoice_docs(einv_date, from_date=from_date)
+    for einv in reversed(pending):
+        print(f"{einv.name} {einv.posting_date} {einv.customer_name} {einv.base_grand_total}")
+    print(f"{len(pending)} Sales Invoices from {getdate(from_date)} need an IRN")
+    if not cint(send):
+        print("Nothing is sent. Add 'send': 1 to generate the IRNs.")
+        return
+    failed = []
+    for einv in reversed(pending):
+        try:
+            generate_irn(dtype="Sales Invoice", dname=einv.name)
+            print(f"OK {einv.name}")
+        except requests.RequestException as e:
+            frappe.db.rollback()
+            failed.append(einv.name)
+            print(f"FAILED {einv.name}: Request to ASP failed: {type(e).__name__}")
+            frappe.log_error(f"Request to ASP failed: {type(e).__name__}", EINV_FAILURE_TITLE + einv.name)
+        except Exception as e:
+            frappe.db.rollback()
+            failed.append(einv.name)
+            print(f"FAILED {einv.name}: {short_error(e)}")
+            frappe.log_error(f"{short_error(e)}\n\n{frappe.get_traceback()}", EINV_FAILURE_TITLE + einv.name)
+        frappe.db.commit()
+    print(f"{len(pending) - len(failed)} done, {len(failed)} failed: {', '.join(failed)}")
+
+
 def _recent_einvoice_failures():
     """Invoice names whose eInvoice failed within the last EINV_RETRY_AFTER_HOURS."""
     cutoff = add_to_date(now_datetime(), hours=-EINV_RETRY_AFTER_HOURS)
@@ -190,22 +235,24 @@ def submit_live_einvoice(dtype, dname):
         raise
 
 
-def _find_pending_einvoice_docs(einv_date, exclude=None, limit=None):
+def _find_pending_einvoice_docs(einv_date, exclude=None, limit=None, from_date=None):
     """Submitted Sales Invoices posted today and still missing an IRN, newest first,
     that the live job had time to handle. An invoice of an earlier date is never
-    sent, so a backlog cannot reach the IRP.
+    sent, so a backlog cannot reach the IRP. With from_date (the manual catch-up),
+    it is every invoice posted on or after that date.
 
     Unregistered (B2C) invoices never get an IRN, so they are filtered here in SQL and
     not by einv_needed() per row. IFNULL keeps einv_needed()'s rule that a blank
     gst_category still needs an eInvoice."""
     values = {"einv_date": einv_date, "exclude": tuple(exclude or ()), "limit": limit,
-              "today": nowdate(), "settled": add_to_date(now_datetime(), minutes=-LIVE_JOB_GRACE_MINS)}
-    query = """SELECT name, posting_date FROM `tabSales Invoice` WHERE docstatus = 1 AND
-        (irn IS NULL OR ack_no IS NULL OR ack_date IS NULL) AND
-        IFNULL(gst_category, '') != 'Unregistered' AND modified < %(settled)s AND
-        posting_date = %(today)s AND
+              "today": nowdate(), "from_date": from_date, "settled": add_to_date(now_datetime(), minutes=-LIVE_JOB_GRACE_MINS)}
+    query = """SELECT name, posting_date, customer_name, base_grand_total FROM `tabSales Invoice`
+        WHERE docstatus = 1 AND (irn IS NULL OR ack_no IS NULL OR ack_date IS NULL) AND
+        IFNULL(gst_category, '') != 'Unregistered' AND {date_filter} AND
         posting_date >= %(einv_date)s{name_filter} ORDER BY posting_date DESC, name DESC{limit}"""
     return frappe.db.sql(query.format(
+        date_filter="posting_date >= %(from_date)s" if from_date
+        else "modified < %(settled)s AND posting_date = %(today)s",
         name_filter=" AND name NOT IN %(exclude)s" if exclude else "",
         limit=" LIMIT %(limit)s" if limit else "",
     ), values, as_dict=1)

@@ -290,6 +290,33 @@ class TestMakeEinvoiceForDocs(SiteTestCase):
         rows = tasks._find_pending_einvoice_docs(self.einv_date, limit=50)
         self.assertNotIn(first, [d.name for d in rows])
 
+    def test_manual_catch_up_lists_older_invoices_and_sends_only_when_asked(self):
+        first = self.pending[0].name
+        yesterday = add_days(nowdate(), -1)
+        frappe.db.set_value("Sales Invoice", first, "posting_date", yesterday, update_modified=False)
+        with patch(f"{TASKS}.generate_irn") as mock_irn:
+            tasks.make_pending_einvoices(from_date=yesterday)
+            mock_irn.assert_not_called()
+            tasks.make_pending_einvoices(from_date=yesterday, send=1)
+        self.assertIn(first, [call.kwargs["dname"] for call in mock_irn.call_args_list])
+
+    def test_manual_catch_up_without_from_date_only_lists(self):
+        with patch(f"{TASKS}.generate_irn") as mock_irn:
+            tasks.make_pending_einvoices()
+            with self.assertRaisesRegex(frappe.ValidationError, "from_date"):
+                tasks.make_pending_einvoices(send=1)
+        mock_irn.assert_not_called()
+
+    def test_manual_catch_up_goes_on_after_a_failure(self):
+        yesterday = add_days(nowdate(), -1)
+        frappe.db.set_value("Sales Invoice", self.pending[0].name, "posting_date", yesterday,
+            update_modified=False)
+        count = len(tasks._find_pending_einvoice_docs(self.einv_date, from_date=yesterday))
+        with patch(f"{TASKS}.generate_irn", side_effect=frappe.ValidationError("Invalid GSTIN")) as mock_irn:
+            tasks.make_pending_einvoices(from_date=yesterday, send=1)  # must not raise
+        self.assertEqual(mock_irn.call_count, count)
+        self.assertTrue(frappe.db.exists("Error Log", {"method": tasks.EINV_FAILURE_TITLE + self.pending[0].name}))
+
     def test_just_submitted_invoice_is_left_to_the_live_job(self):
         first = self.pending[0].name
         frappe.db.set_value("Sales Invoice", first, "modified", now_datetime(), update_modified=False)
