@@ -19,6 +19,15 @@ Detailed guidance lives in `docs/claude/`, split by topic to keep this file shor
 - `docs/claude/architecture-transaction-lock.md` — the transaction view-lock feature (read-restriction on aged transactional docs), locked doctypes, bypass role, known gaps.
 - `docs/claude/architecture-gst-integration.md` — the `india_gst_api/` GST/ASP client layer, the WhiteBooks.in client and what each API family does, the async/background job pattern, and where custom DocTypes/validations live.
 
+## Python requirements
+
+On branch `version-13`, `requirements.txt` must stay compatible with `frappe/requirements.txt` and `erpnext/requirements.txt` on their `version-13` branches, so `pip install -e apps/frappe` reports no `rohit-common` conflict.
+
+- List only packages that Frappe and ERPNext do not already pin (today: `phonenumbers`, `zxing-cpp`).
+- Never list a package Frappe or ERPNext pins (`cryptography`, `pycryptodome`, `Pillow`, `PyQRCode`, `pypng`, ...). Frappe supplies it.
+- If you must list one, the specifier must accept Frappe's pinned version. Never use a floor above Frappe's pin (e.g. `pycryptodome>=3.15` vs Frappe `~=3.10.1`).
+- Before editing `requirements.txt`, compare against both files.
+
 ## GitHub
 
 All GitHub repos, issues and PRs for this project are in `adityaduggal`, never in `erpnext-apps`. The `erpnext-apps` git remote is a read-only upstream: do not create issues or PRs there. Always pass `-R adityaduggal/<repo>` to `gh`: `adityaduggal/rohit-common` and `adityaduggal/rigpl-erpnext`.
