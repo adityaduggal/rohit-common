@@ -11,15 +11,16 @@ and passwords are masked in the output.
         rohit_common.rohit_common.india_gst_api.whitebooks_sandbox_probe.run \\
         --kwargs "{'sales_invoice': 'SINV-XXXX'}"
 
-Without sales_invoice it only authenticates. With it, it also generates the IRN
-twice (the second reply is the duplicate), looks the IRN up by number and by
+Without sales_invoice it only authenticates. The invoice must be submitted, posted
+today and have no IRN, as for the sweep and the on-submit job. With it, it also
+generates the IRN twice (the second reply is the duplicate), looks the IRN up by number and by
 document, generates the e-Way Bill from the IRN and reads it back.
 """
 import json
 import re
 
 import frappe
-from frappe.utils import getdate
+from frappe.utils import getdate, nowdate
 
 from . import whitebooks_provider as wb
 from .common import use_gst_sandbox
@@ -32,6 +33,8 @@ LONG_KEYS = ("SignedInvoice", "SignedQRCode")
 def run(sales_invoice=None):
     if not use_gst_sandbox():
         frappe.throw("The probe only runs in the sandbox (Sandbox Mode or developer_mode)")
+    if sales_invoice:
+        check_invoice(sales_invoice)
     replies = {}
     einv = wb.get_document_session(wb.EINVOICE)
     frappe.cache().delete_value(wb._cache_key(einv, "einv_token"))
@@ -62,6 +65,19 @@ def run(sales_invoice=None):
             if ewb_no:
                 replies["getewaybill"] = wb.eway_request("GET", "getewaybill", params={"ewbNo": ewb_no})
     print(json.dumps(_mask(replies), indent=1, default=str))
+
+
+def check_invoice(sales_invoice):
+    """Only a submitted Sales Invoice posted today that has no IRN is sent"""
+    doc = frappe.db.get_value("Sales Invoice", sales_invoice, ["docstatus", "posting_date", "irn"], as_dict=1)
+    if not doc:
+        frappe.throw(f"Sales Invoice {sales_invoice} not found")
+    if doc.docstatus != 1:
+        frappe.throw(f"Sales Invoice {sales_invoice} is not submitted")
+    if doc.irn:
+        frappe.throw(f"Sales Invoice {sales_invoice} already has an IRN")
+    if getdate(doc.posting_date) != getdate(nowdate()):
+        frappe.throw(f"Sales Invoice {sales_invoice} is posted on {doc.posting_date}, not today")
 
 
 def _data(resp):

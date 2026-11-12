@@ -156,6 +156,12 @@ class TestEnvelope(unittest.TestCase):
         resp = {"status_cd": "0", "status_desc": '[{"ErrorCode":"2150","ErrorMessage":"Duplicate IRN"}]'}
         self.assertEqual(wb.error_codes(resp), ["2150"])
 
+    def test_einvoice_codes_as_the_sandbox_sends_them(self):
+        """The duplicate IRN reply of the WhiteBooks sandbox, 2026-11-12"""
+        resp = {"irp": "NIC1", "status_cd": "0",
+                "status_desc": '[{"errorCode":"2150","errorMessage":"Duplicate IRN"}]'}
+        self.assertEqual(wb.error_codes(resp), ["2150"])
+
     def test_eway_codes_in_error_message(self):
         resp = {"status_cd": "0", "error": {"message": '{"errorCodes":"238,"}'}}
         self.assertEqual(wb.error_codes(resp), ["238"])

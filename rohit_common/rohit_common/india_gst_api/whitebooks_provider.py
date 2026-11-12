@@ -153,7 +153,7 @@ def is_success(resp):
 
 def error_codes(resp):
     """Every error code in a reply, as strings. GSTN uses error_cd, WhiteBooks
-    uses errorCode, and e-Invoice puts an IRP list of {ErrorCode, ErrorMessage}
+    uses errorCode, and e-Invoice puts an IRP list of {errorCode, errorMessage}
     as JSON text in status_desc. e-Way Bill puts {"errorCodes": "238,"} in
     error.message."""
     codes = []
@@ -178,7 +178,8 @@ def _codes_from_text(text):
     if isinstance(parsed, dict):
         return [code for code in str(parsed.get("errorCodes") or "").split(",") if code.strip()]
     if isinstance(parsed, list):
-        return [row.get("ErrorCode") for row in parsed if isinstance(row, dict)]
+        # The IRP list has errorCode on WhiteBooks (seen on the sandbox) and ErrorCode at NIC
+        return [row.get("errorCode") or row.get("ErrorCode") for row in parsed if isinstance(row, dict)]
     return []
 
 

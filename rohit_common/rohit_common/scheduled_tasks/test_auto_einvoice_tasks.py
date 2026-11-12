@@ -13,6 +13,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from frappe.utils import add_days, nowdate
+
 from rohit_common.rohit_common.scheduled_tasks import auto_einvoice_tasks as tasks
 
 
@@ -21,7 +23,7 @@ class TestLiveEinvoiceApplicable(unittest.TestCase):
     @patch("rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.frappe")
     def test_not_applicable_when_einvoice_disabled(self, mock_frappe, mock_einv_needed):
         mock_frappe.get_value.side_effect = [0, "2026-01-01"]  # enable_einvoice, applicable_date
-        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date="2026-08-22")
+        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date=nowdate())
 
         self.assertFalse(tasks._live_einvoice_applicable(doc))
         mock_einv_needed.assert_not_called()
@@ -29,8 +31,8 @@ class TestLiveEinvoiceApplicable(unittest.TestCase):
     @patch("rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.einv_needed")
     @patch("rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.frappe")
     def test_not_applicable_before_applicable_date(self, mock_frappe, mock_einv_needed):
-        mock_frappe.get_value.side_effect = [1, "2027-01-01"]
-        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date="2026-08-22")
+        mock_frappe.get_value.side_effect = [1, "2099-01-01"]
+        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date=nowdate())
 
         self.assertFalse(tasks._live_einvoice_applicable(doc))
         mock_einv_needed.assert_not_called()
@@ -40,7 +42,7 @@ class TestLiveEinvoiceApplicable(unittest.TestCase):
     def test_applicable_when_enabled_after_date_and_einv_needed(self, mock_frappe, mock_einv_needed):
         mock_frappe.get_value.side_effect = [1, "2026-01-01"]
         mock_einv_needed.return_value = 1
-        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date="2026-08-22")
+        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date=nowdate())
 
         self.assertTrue(tasks._live_einvoice_applicable(doc))
         mock_einv_needed.assert_called_once_with("Sales Invoice", "SINV-0001")
@@ -50,7 +52,7 @@ class TestLiveEinvoiceApplicable(unittest.TestCase):
     def test_not_applicable_when_einv_needed_returns_zero(self, mock_frappe, mock_einv_needed):
         mock_frappe.get_value.side_effect = [1, "2026-01-01"]
         mock_einv_needed.return_value = 0
-        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date="2026-08-22")
+        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date=nowdate())
 
         self.assertFalse(tasks._live_einvoice_applicable(doc))
 
@@ -59,9 +61,25 @@ class TestLiveEinvoiceApplicable(unittest.TestCase):
     def test_no_applicable_date_configured_does_not_block(self, mock_frappe, mock_einv_needed):
         mock_frappe.get_value.side_effect = [1, None]
         mock_einv_needed.return_value = 1
-        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date="2020-01-01")
+        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date=nowdate())
 
         self.assertTrue(tasks._live_einvoice_applicable(doc))
+
+    @patch("rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.einv_needed")
+    @patch("rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.frappe")
+    def test_not_applicable_when_not_posted_today(self, mock_frappe, mock_einv_needed):
+        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date=add_days(nowdate(), -1))
+
+        self.assertFalse(tasks._live_einvoice_applicable(doc))
+        mock_einv_needed.assert_not_called()
+
+    @patch("rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.einv_needed")
+    @patch("rohit_common.rohit_common.scheduled_tasks.auto_einvoice_tasks.frappe")
+    def test_not_applicable_when_irn_exists(self, mock_frappe, mock_einv_needed):
+        doc = SimpleNamespace(doctype="Sales Invoice", name="SINV-0001", posting_date=nowdate(), irn="IRN1")
+
+        self.assertFalse(tasks._live_einvoice_applicable(doc))
+        mock_einv_needed.assert_not_called()
 
 
 class TestQueueLiveEinvoiceSubmission(unittest.TestCase):
@@ -236,7 +254,8 @@ class TestProcessBgDocs(SiteTestCase):
 class TestMakeEinvoiceForDocs(SiteTestCase):
     def setUp(self):
         """Uses the site's real einvoice_applicable_date. One real registered invoice on or
-        after that date loses its IRN inside the rolled-back transaction, so it is pending."""
+        after that date loses its IRN and gets today's posting date inside the rolled-back
+        transaction, so it is pending."""
         super().setUp()
         self.einv_date = frappe.db.get_single_value("Rohit Settings", "einvoice_applicable_date")
         if not self.einv_date:
@@ -248,7 +267,8 @@ class TestMakeEinvoiceForDocs(SiteTestCase):
                 "name": ["not in", tasks._recent_einvoice_failures() or [""]]}, limit=1)
         if not made_pending:
             self.skipTest("Needs a submitted registered Sales Invoice with an IRN after the applicable date")
-        frappe.db.set_value("Sales Invoice", made_pending[0], "irn", None, update_modified=False)
+        frappe.db.set_value("Sales Invoice", made_pending[0], {"irn": None, "posting_date": nowdate()},
+            update_modified=False)
         self.pending = tasks._find_pending_einvoice_docs(self.einv_date,
             exclude=tasks._recent_einvoice_failures(), limit=3)
         self.assertIn(made_pending[0], [d.name for d in self.pending])
@@ -258,10 +278,17 @@ class TestMakeEinvoiceForDocs(SiteTestCase):
         details = frappe.get_all("Sales Invoice", fields=["gst_category", "posting_date"],
             filters={"name": ["in", [d.name for d in rows]]})
         self.assertNotIn("Unregistered", {d.gst_category for d in details})
-        self.assertTrue(all(d.posting_date >= getdate(self.einv_date) for d in details))
+        self.assertEqual({d.posting_date for d in details}, {getdate(nowdate())})
         first = self.pending[0].name
         rest = tasks._find_pending_einvoice_docs(self.einv_date, exclude=[first], limit=50)
         self.assertNotIn(first, [d.name for d in rest])
+
+    def test_invoice_not_posted_today_is_not_sent(self):
+        first = self.pending[0].name
+        frappe.db.set_value("Sales Invoice", first, "posting_date", add_days(nowdate(), -1),
+            update_modified=False)
+        rows = tasks._find_pending_einvoice_docs(self.einv_date, limit=50)
+        self.assertNotIn(first, [d.name for d in rows])
 
     def test_just_submitted_invoice_is_left_to_the_live_job(self):
         first = self.pending[0].name

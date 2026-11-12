@@ -5,7 +5,7 @@
 import time
 import frappe
 import requests
-from frappe.utils import add_to_date, flt, getdate, now_datetime
+from frappe.utils import add_to_date, flt, getdate, now_datetime, nowdate
 from frappe.utils.background_jobs import enqueue
 from rq.timeouts import JobTimeoutException
 from ..india_gst_api.einv import einv_needed, generate_irn
@@ -90,7 +90,8 @@ def get_docs_to_submit():
 def make_einvoice_for_docs():
     """
     Makes the einvoice for the Docs based on eInvoice Applicability and its Date.
-    Each run is limited by a batch size and a time budget. An invoice that failed in the
+    Only invoices posted today that have no IRN are sent: an older invoice is never
+    sent by the system, so its IRN must be made by hand. Each run is limited by a batch size and a time budget. An invoice that failed in the
     last EINV_RETRY_AFTER_HOURS is skipped, so a bad GSTIN or HSN does not make an ASP
     call every 15 mins (#16).
     """
@@ -161,7 +162,10 @@ def queue_live_einvoice_submission(doc, method=None):
 def _live_einvoice_applicable(doc):
     """Mirrors make_einvoice_for_docs()'s existing gating logic
     (enable_einvoice, einvoice_applicable_date, einv_needed) so the live
-    path and the backlog sweep agree on what counts as e-invoice-eligible."""
+    path and the backlog sweep agree on what counts as e-invoice-eligible.
+    Like the sweep, it sends only an invoice posted today that has no IRN."""
+    if getattr(doc, "irn", None) or getdate(doc.posting_date) != getdate(nowdate()):
+        return False
     einv_app = flt(frappe.get_value("Rohit Settings", "Rohit Settings", "enable_einvoice"))
     if einv_app != 1:
         return False
@@ -187,17 +191,19 @@ def submit_live_einvoice(dtype, dname):
 
 
 def _find_pending_einvoice_docs(einv_date, exclude=None, limit=None):
-    """Submitted Sales Invoices still missing an IRN, newest first, that the live
-    job had time to handle.
+    """Submitted Sales Invoices posted today and still missing an IRN, newest first,
+    that the live job had time to handle. An invoice of an earlier date is never
+    sent, so a backlog cannot reach the IRP.
 
     Unregistered (B2C) invoices never get an IRN, so they are filtered here in SQL and
     not by einv_needed() per row. IFNULL keeps einv_needed()'s rule that a blank
     gst_category still needs an eInvoice."""
     values = {"einv_date": einv_date, "exclude": tuple(exclude or ()), "limit": limit,
-              "settled": add_to_date(now_datetime(), minutes=-LIVE_JOB_GRACE_MINS)}
+              "today": nowdate(), "settled": add_to_date(now_datetime(), minutes=-LIVE_JOB_GRACE_MINS)}
     query = """SELECT name, posting_date FROM `tabSales Invoice` WHERE docstatus = 1 AND
         (irn IS NULL OR ack_no IS NULL OR ack_date IS NULL) AND
         IFNULL(gst_category, '') != 'Unregistered' AND modified < %(settled)s AND
+        posting_date = %(today)s AND
         posting_date >= %(einv_date)s{name_filter} ORDER BY posting_date DESC, name DESC{limit}"""
     return frappe.db.sql(query.format(
         name_filter=" AND name NOT IN %(exclude)s" if exclude else "",

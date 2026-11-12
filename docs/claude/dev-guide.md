@@ -14,6 +14,7 @@ All commands run from the bench root, not from this app directory, using `bench`
 
 - Run this app's tests: `bench --site <sitename> run-tests --app rohit_common`
 - Run a single test file: `bench --site <sitename> run-tests --module rohit_common.rohit_common.doctype.eway_bill.test_eway_bill`
+- On a site with real data add `--skip-before-tests`. ERPNext's `before_tests` hook saves its own test defaults in Selling Settings and other settings, and fails if a mandatory setting is empty (`MandatoryError ... sales_update_frequency`).
 - Apply migrations (schema + `before_migrate` patches): `bench --site <sitename> migrate`
 - Open a bench Python console: `bench --site <sitename> console`
 - Site-local Python environment: `<bench-root>/env/bin/python`

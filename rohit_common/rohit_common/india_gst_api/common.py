@@ -12,6 +12,25 @@ from frappe.utils import cint, flt, get_last_day, getdate
 SANDBOX_GSTIN = "29AAGCB1286Q000"
 SANDBOX_SELLER_PIN = 560001
 SANDBOX_SELLER_PLACE = "Bengaluru"
+# Sandbox GSTIN of each state, from WhiteBooks' "Sandbox User Name & Password for
+# e-Invoice & e-Way Bill" sheet: state code -> last 3 characters. Public test data.
+# The sandbox IRP does not know real GSTINs (error 3028), so the buyer gets the
+# sandbox GSTIN of its state.
+_SANDBOX_GSTIN_SUFFIX = {
+    "01": "007", "02": "008", "03": "009", "04": "010", "05": "011", "06": "006", "07": "012",
+    "08": "013", "09": "014", "10": "015", "11": "016", "12": "017", "13": "018", "14": "019",
+    "15": "020", "16": "021", "17": "022", "18": "023", "19": "024", "20": "025", "21": "026",
+    "22": "027", "23": "028", "24": "029", "25": "030", "26": "031", "27": "005", "29": "000",
+    "30": "032", "31": "033", "32": "034", "33": "003", "34": "035", "35": "036", "36": "004",
+    "37": "037",
+}
+
+
+def get_sandbox_gstin(state_code):
+    """The WhiteBooks sandbox GSTIN of a state code, or None if the sheet has none"""
+    state_code = str(state_code).zfill(2)
+    suffix = _SANDBOX_GSTIN_SUFFIX.get(state_code)
+    return f"{state_code}AAGCB1286Q{suffix}" if suffix else None
 
 
 def get_place_of_supply(dtype, dname):

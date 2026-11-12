@@ -8,23 +8,31 @@ Tests for einv.py on WhiteBooks (issues #17, #19):
 - update_irn_details() on the real site: it saves irn, ack_no, ack_date and
   signed_qr_code and makes no QR PNG File.
 - The Domestic Invoice print draws the QR from signed_qr_code.
-- TestSandboxRoundTrip runs against the WhiteBooks sandbox only when the site is
-  in the sandbox and site_config has whitebooks_sandbox_test_invoice (a
-  submitted Sales Invoice that has no IRN yet).
+- TestSandboxRoundTrip sends real calls to the WhiteBooks sandbox, only when the
+  site is in the sandbox. It uses the newest submitted registered Sales Invoice,
+  or whitebooks_sandbox_test_invoice from site_config. If site_config has
+  whitebooks_sandbox_api_username and whitebooks_sandbox_api_password (the test
+  user under Sandbox Test Accounts in the WhiteBooks Developer Hub), it signs in
+  as that user and not as the user in Rohit Settings.
 - The item list: Items Synopsis rows with GST HSN Code descriptions, the item-wise
   switch, and a query count that does not grow with the rows.
 
 Writes run in one transaction that is rolled back (SiteTestCase).
 
-Run: bench --site dev-rb-v12 run-tests --module rohit_common.rohit_common.india_gst_api.test_einv_whitebooks
+Run: bench --site dev-rb-v12 run-tests --skip-before-tests --module rohit_common.rohit_common.india_gst_api.test_einv_whitebooks
+Only the sandbox tests: bench --site dev-rb-v12 run-tests --skip-before-tests
+    --module rohit_common.rohit_common.india_gst_api.test_einv_whitebooks --case TestSandboxRoundTrip
 """
+import json
 import unittest
 from unittest.mock import patch
 
 import frappe
+from frappe.utils import now_datetime, nowdate
 
-from rohit_common.rohit_common.india_gst_api import einv
+from rohit_common.rohit_common.india_gst_api import einv, whitebooks_provider
 from rohit_common.rohit_common.india_gst_api.common import use_gst_sandbox
+from rohit_common.rohit_common.scheduled_tasks import auto_einvoice_tasks as tasks
 from rohit_common.rohit_common.scheduled_tasks.test_auto_einvoice_tasks import SiteTestCase
 from rohit_common.utils.query_guard import assert_max_queries
 
@@ -91,6 +99,21 @@ class TestSandboxSeller(unittest.TestCase):
     def test_other_sandbox_gstin_gets_only_its_state(self, _gstin):
         seller = einv.sandbox_seller(self.SELLER)
         self.assertEqual((seller.Gstin, seller.Stcd, seller.Pin), ("27AAGCB1286Q7ZY", "27", 121003))
+
+
+class TestSandboxBuyer(unittest.TestCase):
+    def test_registered_buyer_gets_the_sandbox_gstin_of_its_state(self):
+        real = {"Gstin": "33BYHPS8173C2Z8", "Stcd": "33", "Pin": 600001, "Pos": "33"}
+        buyer = einv.sandbox_buyer(real)
+        self.assertEqual((buyer.Gstin, buyer.Stcd, buyer.Pin, buyer.Pos), ("33AAGCB1286Q003", "33", 600001, "33"))
+        self.assertEqual(real["Gstin"], "33BYHPS8173C2Z8")  # input not changed
+
+    def test_numeric_state_code_is_padded(self):
+        self.assertEqual(einv.sandbox_buyer({"Gstin": "06AAACR1567J1ZC", "Stcd": 6}).Gstin, "06AAGCB1286Q006")
+
+    def test_unregistered_buyer_and_unknown_state_stay_the_same(self):
+        self.assertEqual(einv.sandbox_buyer({"Gstin": "URP", "Stcd": "96"})["Gstin"], "URP")
+        self.assertEqual(einv.sandbox_buyer({"Gstin": "38AAAAA0000A1Z5", "Stcd": "38"})["Gstin"], "38AAAAA0000A1Z5")
 
 
 class TestUpdateIrnDetails(SiteTestCase):
@@ -177,11 +200,61 @@ class TestSandboxRoundTrip(SiteTestCase):
 
     def setUp(self):
         super().setUp()
-        self.name = frappe.conf.get("whitebooks_sandbox_test_invoice")
-        if not (self.name and use_gst_sandbox()):
-            self.skipTest("Set whitebooks_sandbox_test_invoice in site_config on a sandbox site")
+        if not use_gst_sandbox():
+            self.skipTest("Runs only on a sandbox site (Sandbox Mode or developer_mode)")
+        self.use_sandbox_api_user()
+        self.name = frappe.conf.get("whitebooks_sandbox_test_invoice") or frappe.db.get_value(
+            "Sales Invoice", {"docstatus": 1, "gst_category": "Registered Regular"}, order_by="posting_date desc")
+        if not self.name:
+            self.skipTest("Needs a submitted Registered Regular Sales Invoice")
+        frappe.db.set_value("Rohit Settings", "Rohit Settings", "enable_einvoice", 1)
         frappe.db.set_value("Sales Invoice", self.name, {"irn": None, "ack_no": None, "ack_date": None,
             "signed_qr_code": None}, update_modified=False)
+
+    def use_sandbox_api_user(self):
+        """Rohit Settings on a copied site holds the production API user, which the
+        sandbox rejects (WB_ERR_9001). The sandbox user is kept in site_config."""
+        user = {"username": frappe.conf.get("whitebooks_sandbox_api_username"),
+                "password": frappe.conf.get("whitebooks_sandbox_api_password")}
+        if not all(user.values()):
+            return
+        real_session = whitebooks_provider.get_document_session
+
+        def sandbox_session(api_name):
+            session = real_session(api_name)
+            session.update(user)
+            return session
+
+        patcher = patch.object(whitebooks_provider, "get_document_session", side_effect=sandbox_session)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_invoice_posted_today_gets_a_new_irn_from_the_on_submit_job(self):
+        """The on-submit job on an invoice posted today. The document number sent is
+        new on each run, so the sandbox makes a new IRN and does not reply duplicate."""
+        frappe.db.set_value("Sales Invoice", self.name, "posting_date", nowdate(), update_modified=False)
+        doc = frappe.get_doc("Sales Invoice", self.name)
+        self.assertTrue(tasks._live_einvoice_applicable(doc))
+        doc_no = now_datetime().strftime("T%y%m%d%H%M%S")
+        real_json = einv.gen_einv_json
+
+        def json_with_new_doc_no(dtype, dname):
+            payload = json.loads(real_json(dtype, dname))
+            payload["DocDtls"]["No"] = doc_no
+            return json.dumps(payload)
+
+        with patch(f"{EINV}.auto_ewb_needed", return_value=False), \
+                patch(f"{EINV}.gen_einv_json", side_effect=json_with_new_doc_no), \
+                patch(f"{EINV}.get_irn_by_doc", side_effect=AssertionError("Sandbox replied duplicate IRN")):
+            tasks.submit_live_einvoice("Sales Invoice", self.name)
+
+        saved = frappe.db.get_value("Sales Invoice", self.name,
+            ["irn", "ack_no", "ack_date", "signed_qr_code"], as_dict=1)
+        self.assertEqual(len(saved.irn or ""), 64)
+        self.assertTrue(saved.ack_no and saved.ack_date and saved.signed_qr_code)
+        self.assertEqual(einv.get_irn_details(saved.irn).get("Irn"), saved.irn)
+        doc.reload()
+        self.assertFalse(tasks._live_einvoice_applicable(doc))
 
     def test_generate_then_duplicate_both_save_the_signed_qr_code(self):
         with patch(f"{EINV}.auto_ewb_needed", return_value=False):

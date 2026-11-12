@@ -17,8 +17,8 @@ from rq.timeouts import JobTimeoutException
 from . import whitebooks_provider
 from .eway_bill_api import get_taxes_type, get_transport_mode, get_eway_distance
 from .common import get_default_gstin, get_numeric_state_code, get_gst_pincode, \
-    get_gst_based_uom, get_place_of_supply, use_gst_sandbox, SANDBOX_GSTIN, SANDBOX_SELLER_PIN, \
-    SANDBOX_SELLER_PLACE
+    get_gst_based_uom, get_place_of_supply, get_sandbox_gstin, use_gst_sandbox, SANDBOX_GSTIN, \
+    SANDBOX_SELLER_PIN, SANDBOX_SELLER_PLACE
 DUPLICATE_IRN_ERROR_CODE = "2150"
 EWB_FAILURE_TITLE = "e-Way Bill from IRN Failed for "
 
@@ -155,6 +155,8 @@ def gen_einv_json(dtype, dname):
     if use_gst_sandbox():
         einv_dt.SellerDtls = sandbox_seller(einv_dt.SellerDtls)
     einv_dt = add_einv_adr_details(einv_dt, buy_add, type_of_detail="buyer", pos=pos)
+    if use_gst_sandbox():
+        einv_dt.BuyerDtls = sandbox_buyer(einv_dt.BuyerDtls)
     einv_dt = add_einv_adr_details(einv_dt, ship_add, type_of_detail="ship",
         port_code=dtd.port_code)
     einv_it_val = get_einv_item_details(dtype, dname)
@@ -179,6 +181,19 @@ def sandbox_seller(seller):
     if gstin == SANDBOX_GSTIN:
         seller.update({"Pin": SANDBOX_SELLER_PIN, "Loc": SANDBOX_SELLER_PLACE})
     return seller
+
+
+def sandbox_buyer(buyer):
+    """
+    The sandbox IRP does not know real GSTINs (error 3028). So a registered buyer
+    gets the sandbox GSTIN of its own state, which keeps the state code and pincode
+    valid. An unregistered or export buyer (URP) and a state that has no sandbox
+    GSTIN stay as they are.
+    """
+    if buyer.get("Gstin") in (None, "", "URP"):
+        return buyer
+    gstin = get_sandbox_gstin(buyer.get("Stcd"))
+    return frappe._dict(buyer, Gstin=gstin) if gstin else buyer
 
 
 def get_eway_details(dtype, dname):
